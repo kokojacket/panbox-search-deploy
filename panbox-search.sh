@@ -238,7 +238,7 @@ download_compose_file() {
     fi
 
     info "下载 docker-compose.yml 文件..."
-    if curl -fsSL https://raw.githubusercontent.com/kokojacket/panbox-search/main/docker-compose.yml -o docker-compose.yml; then
+    if curl -fsSL https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/docker-compose.yml -o docker-compose.yml; then
         success "docker-compose.yml 下载完成"
     else
         error "docker-compose.yml 下载失败"
