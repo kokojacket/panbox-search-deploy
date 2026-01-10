@@ -4,18 +4,10 @@
 
 ## 🚀 快速部署
 
-### 方式 1：一键安装（推荐）
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search.sh -o panbox-search.sh
 chmod +x panbox-search.sh
 ./panbox-search.sh
-```
-
-### 方式 2：直接运行
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search.sh | bash -s install
 ```
 
 ---
