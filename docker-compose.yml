@@ -32,10 +32,6 @@ services:
       - APP_TIMEZONE=Asia/Shanghai
       - SYSTEM_SALT=Panbox Search
 
-      # 管理员账号（固定配置，首次登录后请修改密码）
-      - ADMIN_USER=admin
-      - ADMIN_PASSWORD=panbox-search
-
       # 网站名称（可在后台修改）
       - SITE_NAME=Panbox Search
 
