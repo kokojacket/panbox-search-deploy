@@ -208,6 +208,7 @@ create_directories() {
     mkdir -p "${PANBOX_DIR}/app/runtime"
     mkdir -p "${PANBOX_DIR}/app/uploads"
     mkdir -p "${PANBOX_DIR}/app/install"
+    mkdir -p "${PANBOX_DIR}/mysql"
 
     chmod -R 777 "${PANBOX_DIR}"
 
@@ -458,41 +459,20 @@ show_deployment_info() {
 
     print_line
     echo ""
-    info "📍 访问地址:"
+    info "📍 最终访问路径:"
     echo ""
-    if [ -n "$PUBLIC_IP" ]; then
-        echo "   🌐 http://${PUBLIC_IP}:${APP_PORT} (公网)"
-    fi
     if [ -n "$LOCAL_IP" ]; then
-        echo "   🌐 http://${LOCAL_IP}:${APP_PORT} (内网)"
+        echo "   内网地址：http://${LOCAL_IP}:${APP_PORT}"
+    else
+        echo "   内网地址：未检测到内网 IP"
     fi
-    echo "   🌐 http://localhost:${APP_PORT} (本地)"
+    if [ -n "$PUBLIC_IP" ]; then
+        echo "   外网地址：http://${PUBLIC_IP}:${APP_PORT}"
+    else
+        echo "   外网地址：未检测到公网 IP"
+    fi
     echo ""
 
-    info "🗄️  数据库配置:"
-    echo "   数据库服务器: ${DB_HOST}"
-    echo "   数据库端口: ${DB_PORT}"
-    echo "   数据库用户名: ${DB_USER}"
-    echo "   数据库密码: ${DB_PASSWORD}"
-    echo "   数据库名: ${DB_NAME}"
-    echo ""
-
-    info "📂 目录结构:"
-    echo "   工作目录: ${PANBOX_DIR}/"
-    echo "   配置文件: ${PANBOX_DIR}/docker-compose.yml"
-    echo "   环境变量: ${PANBOX_DIR}/.env"
-    echo "   应用数据: ${PANBOX_DIR}/app/"
-    echo "   数据库数据: ${PANBOX_DIR}/mysql/"
-    echo ""
-
-    info "🔧 常用命令:"
-    echo "   进入工作目录: cd ${PANBOX_DIR}"
-    echo "   查看配置文件: cat ${PANBOX_DIR}/.env"
-    echo "   启动服务: bash $0 start"
-    echo "   停止服务: bash $0 stop"
-    echo "   重启服务: bash $0 restart"
-    echo "   查看日志: cd ${PANBOX_DIR} && docker-compose logs -f"
-    echo ""
 }
 
 # 菜单系统
@@ -580,6 +560,7 @@ handle_menu_choice() {
             ;;
         2)
             log "🔄 开始更新 Panbox-Search 系统..."
+            AUTO_INSTALL=true
             check_docker_permissions
             check_docker_compose
             if [ -d "${PANBOX_DIR}" ]; then
