@@ -240,26 +240,52 @@ download_compose_file() {
 
     info "下载 docker-compose.yml 文件..."
 
-    local compose_url="https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/docker-compose.yml"
+    # 多个备用下载源（国内加速镜像 + GitHub 原始地址）
+    local compose_urls=(
+        "https://gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/docker-compose.yml"
+        "https://hk.gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/docker-compose.yml"
+        "https://cdn.gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/docker-compose.yml"
+        "https://edgeone.gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/docker-compose.yml"
+        "https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/docker-compose.yml"
+    )
+
     local max_retries=3
     local retry_delay=1
-    local attempt=1
+    local source_index=1
+    local total_sources=${#compose_urls[@]}
 
-    while [ $attempt -le $max_retries ]; do
-        info "下载尝试 (${attempt}/${max_retries})..."
-        if curl -4 -fSsL --connect-timeout 3 --max-time 8 "$compose_url" -o docker-compose.yml; then
-            success "docker-compose.yml 下载完成"
-            return 0
+    for compose_url in "${compose_urls[@]}"; do
+        local source_name="GitHub 原始地址"
+        if [[ "$compose_url" == *"hk.gh-proxy.org"* ]]; then
+            source_name="香港代理"
+        elif [[ "$compose_url" == *"cdn.gh-proxy.org"* ]]; then
+            source_name="CDN 代理"
+        elif [[ "$compose_url" == *"edgeone.gh-proxy.org"* ]]; then
+            source_name="EdgeOne 代理"
+        elif [[ "$compose_url" == *"gh-proxy.org"* ]]; then
+            source_name="gh-proxy.org 代理"
         fi
 
-        if [ $attempt -lt $max_retries ]; then
-            warning "下载超时或失败，${retry_delay} 秒后重试..."
-            sleep $retry_delay
-        fi
-        attempt=$((attempt + 1))
+        local attempt=1
+        while [ $attempt -le $max_retries ]; do
+            info "[$source_index/$total_sources] 下载尝试 (${attempt}/${max_retries}): ${source_name}"
+            if curl -4 -fSsL --connect-timeout 3 --max-time 8 "$compose_url" -o docker-compose.yml; then
+                success "docker-compose.yml 下载完成"
+                return 0
+            fi
+
+            if [ $attempt -lt $max_retries ]; then
+                warning "下载超时或失败，${retry_delay} 秒后重试..."
+                sleep $retry_delay
+            fi
+            attempt=$((attempt + 1))
+        done
+
+        warning "当前地址连续失败，切换下一个下载源..."
+        source_index=$((source_index + 1))
     done
 
-    error "docker-compose.yml 下载失败（已重试 ${max_retries} 次，每次超时 8 秒）"
+    error "docker-compose.yml 下载失败（已尝试 ${total_sources} 个下载源，每源重试 ${max_retries} 次）"
     exit 1
 }
 
