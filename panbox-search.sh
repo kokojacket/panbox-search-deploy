@@ -454,13 +454,22 @@ show_deployment_info() {
     echo ""
     print_title "🎉 部署完成！"
 
-    # 获取公网 IP
-    PUBLIC_IP=$(curl -s --connect-timeout 3 --max-time 3 https://api.ipify.org 2>/dev/null || true)
-    if [ -z "$PUBLIC_IP" ]; then
-        PUBLIC_IP=$(curl -s --connect-timeout 3 --max-time 3 https://ifconfig.me 2>/dev/null || true)
+    # 获取公网 IPv4（仅使用 IPv4，避免输出 IPv6）
+    PUBLIC_IP=$(curl -4 -s --connect-timeout 3 --max-time 3 https://api.ipify.org 2>/dev/null || true)
+    if [[ ! "$PUBLIC_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        PUBLIC_IP=""
     fi
     if [ -z "$PUBLIC_IP" ]; then
-        PUBLIC_IP=$(curl -s --connect-timeout 3 --max-time 3 https://icanhazip.com 2>/dev/null || true)
+        PUBLIC_IP=$(curl -4 -s --connect-timeout 3 --max-time 3 https://ifconfig.me 2>/dev/null || true)
+        if [[ ! "$PUBLIC_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            PUBLIC_IP=""
+        fi
+    fi
+    if [ -z "$PUBLIC_IP" ]; then
+        PUBLIC_IP=$(curl -4 -s --connect-timeout 3 --max-time 3 https://icanhazip.com 2>/dev/null || true)
+        if [[ ! "$PUBLIC_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            PUBLIC_IP=""
+        fi
     fi
 
     # 获取内网 IP（作为备用）
