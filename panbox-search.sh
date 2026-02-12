@@ -239,12 +239,28 @@ download_compose_file() {
     fi
 
     info "下载 docker-compose.yml 文件..."
-    if curl -fsSL https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/docker-compose.yml -o docker-compose.yml; then
-        success "docker-compose.yml 下载完成"
-    else
-        error "docker-compose.yml 下载失败"
-        exit 1
-    fi
+
+    local compose_url="https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/docker-compose.yml"
+    local max_retries=3
+    local retry_delay=1
+    local attempt=1
+
+    while [ $attempt -le $max_retries ]; do
+        info "下载尝试 (${attempt}/${max_retries})..."
+        if curl -4 -fSsL --connect-timeout 3 --max-time 8 "$compose_url" -o docker-compose.yml; then
+            success "docker-compose.yml 下载完成"
+            return 0
+        fi
+
+        if [ $attempt -lt $max_retries ]; then
+            warning "下载超时或失败，${retry_delay} 秒后重试..."
+            sleep $retry_delay
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    error "docker-compose.yml 下载失败（已重试 ${max_retries} 次，每次超时 8 秒）"
+    exit 1
 }
 
 # 配置环境变量

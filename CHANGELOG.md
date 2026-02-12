@@ -9,6 +9,7 @@
 - `panbox-search.sh`：部署完成信息改为仅展示最终访问路径（内网/外网），并在未检测到 IP 时给出明确提示。
 - `panbox-search.sh`：移除部署完成后的本地地址、数据库配置、目录结构与常用命令展示，减少无关输出。
 - `panbox-search.sh`：菜单选项 `2`（更新系统）默认走非交互覆盖流程，不再询问是否覆盖 `docker-compose.yml`。
+- `panbox-search.sh`：下载 `docker-compose.yml` 增加重试机制（最多 3 次），并将单次总超时调整为 8 秒，减少首次网络抖动导致的卡住问题。
 
 ## [bab1c83] - 2026-02-12
 
