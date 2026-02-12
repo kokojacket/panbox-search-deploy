@@ -453,42 +453,25 @@ show_deployment_info() {
         APP_PORT="80"
     fi
 
-    # 数据库配置（从 docker-compose.yml 硬编码值）
-    DB_HOST="mysql"
-    DB_PORT="3306"
-    DB_NAME="panbox-search"
-    DB_USER="panbox-search"
-    DB_PASSWORD="panbox-search"
-    DB_PREFIX="qf_"
-    APP_DEBUG="false"
-    APP_TIMEZONE="Asia/Shanghai"
-
-    echo ""
-    print_line
     echo ""
     success "✅ 应用已成功启动！"
-    echo ""
-    print_line
-    echo ""
-    warning "💾 请保存下面信息，用于后台登录和管理："
-    echo ""
+    info "📍 最终访问路径"
 
-    print_line
-    echo ""
-    info "📍 最终访问路径:"
-    echo ""
     if [ -n "$LOCAL_IP" ]; then
         echo "   内网地址：http://${LOCAL_IP}:${APP_PORT}"
     else
         echo "   内网地址：未检测到内网 IP"
     fi
+
     if [ -n "$PUBLIC_IP" ]; then
         echo "   外网地址：http://${PUBLIC_IP}:${APP_PORT}"
     else
         echo "   外网地址：未检测到公网 IP"
     fi
-    echo ""
 
+    echo ""
+    warning "💾 请保存以上访问地址"
+    echo ""
 }
 
 # 菜单系统

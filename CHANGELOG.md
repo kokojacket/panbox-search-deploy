@@ -11,6 +11,7 @@
 - `panbox-search.sh`：菜单选项 `2`（更新系统）默认走非交互覆盖流程，不再询问是否覆盖 `docker-compose.yml`。
 - `panbox-search.sh`：下载 `docker-compose.yml` 增加重试机制（最多 3 次），并将单次总超时调整为 8 秒，减少首次网络抖动导致的卡住问题。
 - `panbox-search.sh`：修复部署完成阶段公网 IP 获取失败导致脚本提前退出的问题（在 `set -e` 下改为非致命并限制 3 秒超时）。
+- `panbox-search.sh`：精简部署完成区域的分割线与冗余提示，保留关键状态和最终访问路径，提升终端可读性。
 
 ## [bab1c83] - 2026-02-12
 
