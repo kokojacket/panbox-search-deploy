@@ -429,12 +429,12 @@ show_deployment_info() {
     print_title "🎉 部署完成！"
 
     # 获取公网 IP
-    PUBLIC_IP=$(curl -s --connect-timeout 3 https://api.ipify.org 2>/dev/null)
+    PUBLIC_IP=$(curl -s --connect-timeout 3 --max-time 3 https://api.ipify.org 2>/dev/null || true)
     if [ -z "$PUBLIC_IP" ]; then
-        PUBLIC_IP=$(curl -s --connect-timeout 3 https://ifconfig.me 2>/dev/null)
+        PUBLIC_IP=$(curl -s --connect-timeout 3 --max-time 3 https://ifconfig.me 2>/dev/null || true)
     fi
     if [ -z "$PUBLIC_IP" ]; then
-        PUBLIC_IP=$(curl -s --connect-timeout 3 https://icanhazip.com 2>/dev/null)
+        PUBLIC_IP=$(curl -s --connect-timeout 3 --max-time 3 https://icanhazip.com 2>/dev/null || true)
     fi
 
     # 获取内网 IP（作为备用）
