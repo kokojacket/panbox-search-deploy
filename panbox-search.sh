@@ -206,6 +206,7 @@ create_directories() {
     fi
 
     mkdir -p "${PANBOX_DIR}/app/runtime"
+    mkdir -p "${PANBOX_DIR}/app/data"
     mkdir -p "${PANBOX_DIR}/app/uploads"
     mkdir -p "${PANBOX_DIR}/app/install"
     mkdir -p "${PANBOX_DIR}/mysql"
@@ -215,6 +216,7 @@ create_directories() {
     success "数据目录创建完成"
     info "  - 工作目录: ${PANBOX_DIR}/"
     info "  - 应用数据: ${PANBOX_DIR}/app/"
+    info "  - License 数据: ${PANBOX_DIR}/app/data/"
     info "  - 数据库数据: ${PANBOX_DIR}/mysql/"
 }
 

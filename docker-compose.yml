@@ -39,6 +39,8 @@ services:
     volumes:
       # 运行时目录（缓存、日志等）
       - /opt/panbox-search/app/runtime:/var/www/html/runtime
+      # License 设备标识持久化目录
+      - /opt/panbox-search/app/data:/var/www/html/data
       # 上传文件目录
       - /opt/panbox-search/app/uploads:/var/www/html/public/uploads
       # 安装目录（保存安装锁文件）

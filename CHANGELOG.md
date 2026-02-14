@@ -5,6 +5,8 @@
 ## [Unreleased] - 2026-02-13
 
 ### Changed
+- `docker-compose.yml`：新增 `/var/www/html/data` 持久化挂载（`/opt/panbox-search/app/data`），用于保存设备 UUID 等关键标识。
+- `panbox-search.sh`：安装流程新增 `mkdir -p "${PANBOX_DIR}/app/data"`，与 compose 挂载目录保持一致。
 - `panbox-search.sh`：安装流程新增 `mkdir -p "${PANBOX_DIR}/mysql"`，确保 MySQL 数据目录与提示信息一致。
 - `panbox-search.sh`：部署完成信息改为仅展示最终访问路径（内网/外网），并在未检测到 IP 时给出明确提示。
 - `panbox-search.sh`：移除部署完成后的本地地址、数据库配置、目录结构与常用命令展示，减少无关输出。
