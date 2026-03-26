@@ -14,7 +14,6 @@ set -e
 # 清理函数
 cleanup() {
     local exit_code=$?
-    [ -d "${PANBOX_DIR}/deploy" ] && rm -rf "${PANBOX_DIR}/deploy"
     exit $exit_code
 }
 
@@ -25,6 +24,7 @@ trap 'error "发生错误，脚本退出" >&2' ERR
 PANBOX_DIR="/opt/panbox-search"
 NEED_SUDO=false
 COMPOSE_CMD=""
+JUST_INSTALLED=false
 
 # 颜色定义
 RED='\033[0;31m'
@@ -168,16 +168,59 @@ check_docker_compose() {
 
 # 检查是否已经安装
 check_installed() {
-    if [ -f "${PANBOX_DIR}/docker-compose.yml" ] && [ -d "${PANBOX_DIR}" ]; then
-        # 检查容器是否在运行
-        cd "${PANBOX_DIR}"
-        if docker-compose ps -q | grep -q .; then
-            return 0  # 已安装且正在运行
-        elif [ -f "${PANBOX_DIR}/.env" ]; then
-            return 0  # 已安装（配置文件存在）
-        fi
+    if [ ! -d "${PANBOX_DIR}" ] || [ ! -f "${PANBOX_DIR}/docker-compose.yml" ]; then
+        return 1
     fi
-    return 1  # 未安装
+
+    if [ -f "${PANBOX_DIR}/.env" ]; then
+        return 0  # 已安装（配置文件存在）
+    fi
+
+    if ! command -v docker &> /dev/null; then
+        return 1
+    fi
+
+    if ! check_docker_permissions > /dev/null 2>&1; then
+        return 1
+    fi
+
+    if [ -z "$COMPOSE_CMD" ] && ! check_docker_compose > /dev/null 2>&1; then
+        return 1
+    fi
+
+    cd "${PANBOX_DIR}"
+    if [ "$NEED_SUDO" = true ]; then
+        sudo $COMPOSE_CMD ps -q 2>/dev/null | grep -q .
+    else
+        $COMPOSE_CMD ps -q 2>/dev/null | grep -q .
+    fi
+}
+
+# 检测当前服务已使用的端口（用于补全旧 .env 配置）
+detect_existing_app_port() {
+    local current_port=""
+
+    if [ ! -f "${PANBOX_DIR}/docker-compose.yml" ]; then
+        return 1
+    fi
+
+    if [ -z "$COMPOSE_CMD" ] && ! check_docker_compose > /dev/null 2>&1; then
+        return 1
+    fi
+
+    cd "${PANBOX_DIR}"
+    if [ "$NEED_SUDO" = true ]; then
+        current_port=$(sudo $COMPOSE_CMD port app 80 2>/dev/null | head -n 1 | awk -F: '{print $NF}')
+    else
+        current_port=$($COMPOSE_CMD port app 80 2>/dev/null | head -n 1 | awk -F: '{print $NF}')
+    fi
+
+    if [[ "$current_port" =~ ^[0-9]+$ ]]; then
+        echo "$current_port"
+        return 0
+    fi
+
+    return 1
 }
 
 # 创建必要的目录
@@ -296,10 +339,6 @@ configure_env() {
     info "配置环境变量..."
     cd "${PANBOX_DIR}"
 
-    info "正在检测可用端口..."
-    APP_PORT=$(find_available_port)
-    success "找到可用端口: ${APP_PORT}"
-
     # 检查 .env 文件是否已存在
     if [ -f ".env" ]; then
         warning ".env 配置文件已存在"
@@ -307,6 +346,15 @@ configure_env() {
         # 检查是否缺少 APP_PORT 配置
         if ! grep -q "^APP_PORT" .env; then
             warning "检测到 .env 缺少 APP_PORT 配置，正在补全..."
+            APP_PORT=$(detect_existing_app_port || true)
+            if [ -n "$APP_PORT" ]; then
+                info "检测到当前服务正在使用端口: ${APP_PORT}"
+            else
+                info "未检测到当前服务端口，正在查找可用端口..."
+                APP_PORT=$(find_available_port)
+                success "找到可用端口: ${APP_PORT}"
+            fi
+
             # 在文件开头插入 APP_PORT
             if command -v sed &> /dev/null; then
                 # 使用临时文件方式（兼容性更好）
@@ -324,31 +372,11 @@ configure_env() {
             info ".env 配置完整，跳过配置"
             return 0
         fi
-
-        # 以下代码仅在用户明确要求覆盖时执行
-        if [ ! -t 0 ] || [ "${AUTO_INSTALL}" = "true" ]; then
-            info "非交互模式，备份旧配置并创建新配置..."
-            mv .env .env.backup.$(date +%Y%m%d_%H%M%S)
-            info "旧配置已备份"
-        else
-            read -p "是否覆盖现有配置？(y/N) [默认: n]: " -n 1 -r OVERWRITE_ENV </dev/tty
-            echo
-            if [[ $OVERWRITE_ENV =~ ^[Yy]$ ]]; then
-                OVERWRITE_ENV=y
-            else
-                OVERWRITE_ENV=n
-            fi
-
-            if [[ $OVERWRITE_ENV != "y" ]]; then
-                info "保留现有配置，跳过环境变量配置"
-                return 0
-            else
-                info "备份旧配置..."
-                mv .env .env.backup.$(date +%Y%m%d_%H%M%S)
-                info "旧配置已备份"
-            fi
-        fi
     fi
+
+    info "正在检测可用端口..."
+    APP_PORT=$(find_available_port)
+    success "找到可用端口: ${APP_PORT}"
 
     # 创建 .env 文件 - 在 PANBOX_DIR 根目录
     cat > .env <<EOF
@@ -368,6 +396,70 @@ EOF
     success "环境变量配置完成"
     info "应用端口: ${APP_PORT}"
     info "其他配置将在容器启动时自动生成"
+}
+
+# 更新系统
+update_system() {
+    AUTO_INSTALL=true
+    log "🔄 开始更新 Panbox-Search 系统..."
+
+    if [ ! -d "${PANBOX_DIR}" ]; then
+        error "未找到 Panbox-Search 安装目录: ${PANBOX_DIR}"
+        return 1
+    fi
+
+    check_docker
+    check_docker_permissions
+    check_docker_compose
+
+    cd "${PANBOX_DIR}"
+    download_compose_file
+    configure_env  # 检查并补全 .env 配置
+    log "📦 正在拉取最新 Docker 镜像..."
+    execute_compose "pull" "false"
+    log "🚀 正在启动容器服务..."
+    execute_compose "up -d" "false"
+}
+
+# 安装系统
+install_system() {
+    AUTO_INSTALL=true
+    log "✨ 开始安装 Panbox-Search 系统..."
+    check_docker
+    check_docker_permissions
+    check_docker_compose
+    create_directories
+    download_compose_file
+    configure_env
+    cd "${PANBOX_DIR}"
+    log "📦 正在拉取 Docker 镜像..."
+    execute_compose "pull" "false"
+    log "🚀 正在启动容器服务..."
+    execute_compose "up -d" "false"
+}
+
+# 未安装时提示是否立即安装（仅交互模式）
+ensure_installed_for_menu() {
+    local action_label="$1"
+    JUST_INSTALLED=false
+
+    if check_installed; then
+        return 0
+    fi
+
+    warning "⚠️  当前尚未安装 Panbox-Search 系统，无法执行${action_label}操作。"
+    read -p "是否现在开始安装？(Y/n) [默认: y]: " -n 1 -r INSTALL_CHOICE </dev/tty
+    echo
+    INSTALL_CHOICE=${INSTALL_CHOICE:-y}
+
+    if [[ $INSTALL_CHOICE =~ ^[Yy]$ ]]; then
+        install_system
+        JUST_INSTALLED=true
+        return 0
+    fi
+
+    info "已取消${action_label}操作，返回主菜单..."
+    return 1
 }
 
 # 执行 Docker Compose 命令
@@ -420,6 +512,12 @@ execute_compose() {
 # 服务管理函数
 manage_service() {
     local action=$1
+
+    if ! check_installed; then
+        error "未找到 Panbox-Search 安装目录或配置，请先安装系统"
+        return 1
+    fi
+
     cd "${PANBOX_DIR}"
 
     # 检查 Docker 权限
@@ -556,68 +654,57 @@ handle_menu_choice() {
                 echo ""
                 UPDATE_CHOICE=${UPDATE_CHOICE:-y}
                 if [[ $UPDATE_CHOICE =~ ^[Yy]$ ]]; then
-                    log "🔄 开始更新 Panbox-Search 系统..."
-                    check_docker_permissions
-                    check_docker_compose
-
-                    # 更新流程：停止 → 检查权限 → 补全配置 → 拉取新镜像 → 启动
-                    cd "${PANBOX_DIR}"
-                    log "🛑 正在停止现有服务..."
-                    execute_compose "down" "false"
-
-                    check_docker_permissions
-                    configure_env  # 检查并补全 .env 配置
-                    log "📦 正在拉取最新 Docker 镜像..."
-                    execute_compose "pull" "false"
-                    log "🚀 正在启动容器服务..."
-                    execute_compose "up -d" "false"
-
+                    update_system
                     echo ""
                     show_deployment_info
                 else
                     info "取消更新，返回主菜单..."
                 fi
             else
-                # 新安装流程
-                check_docker_permissions
-                check_docker
-                check_docker_compose
-                create_directories
-                download_compose_file
-                configure_env
-                cd "${PANBOX_DIR}"
-                log "📦 正在拉取 Docker 镜像..."
-                execute_compose "pull" "false"
-                log "🚀 正在启动容器服务..."
-                execute_compose "up -d" "false"
+                install_system
                 echo ""
                 show_deployment_info
             fi
             ;;
         2)
-            log "🔄 开始更新 Panbox-Search 系统..."
-            AUTO_INSTALL=true
-            check_docker_permissions
-            check_docker_compose
-            if [ -d "${PANBOX_DIR}" ]; then
-                cd "${PANBOX_DIR}"
-                download_compose_file
-                configure_env  # 检查并补全 .env 配置
-                execute_compose "pull" "false"
-                execute_compose "up -d" "false"
-                success "系统更新完成"
-            else
-                error "未找到 Panbox-Search 安装目录: ${PANBOX_DIR}"
+            if ensure_installed_for_menu "更新"; then
+                if [ "$JUST_INSTALLED" = true ]; then
+                    echo ""
+                    show_deployment_info
+                elif update_system; then
+                    success "系统更新完成"
+                fi
             fi
             ;;
         3)
-            manage_service "start"
+            if ensure_installed_for_menu "启动"; then
+                if [ "$JUST_INSTALLED" = true ]; then
+                    echo ""
+                    show_deployment_info
+                else
+                    manage_service "start"
+                fi
+            fi
             ;;
         4)
-            manage_service "stop"
+            if ensure_installed_for_menu "停止"; then
+                if [ "$JUST_INSTALLED" = true ]; then
+                    echo ""
+                    show_deployment_info
+                else
+                    manage_service "stop"
+                fi
+            fi
             ;;
         5)
-            manage_service "restart"
+            if ensure_installed_for_menu "重启"; then
+                if [ "$JUST_INSTALLED" = true ]; then
+                    echo ""
+                    show_deployment_info
+                else
+                    manage_service "restart"
+                fi
+            fi
             ;;
         6)
             log "👋 感谢使用 Panbox-Search 系统，再见！"
@@ -666,19 +753,7 @@ else
     # 命令行模式
     case "$1" in
         "install")
-            AUTO_INSTALL=true
-            log "✨ 开始安装 Panbox-Search 系统..."
-            check_docker_permissions
-            check_docker
-            check_docker_compose
-            create_directories
-            download_compose_file
-            configure_env
-            cd "${PANBOX_DIR}"
-            log "📦 正在拉取 Docker 镜像..."
-            execute_compose "pull" "false"
-            log "🚀 正在启动容器服务..."
-            execute_compose "up -d" "false"
+            install_system
             echo ""
             show_deployment_info
             ;;
