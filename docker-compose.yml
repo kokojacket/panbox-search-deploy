@@ -99,7 +99,3 @@ networks:
   panbox-search-network:
     driver: bridge
 
-# ==================== 数据卷配置 ====================
-volumes:
-  mysql-data:
-    driver: local

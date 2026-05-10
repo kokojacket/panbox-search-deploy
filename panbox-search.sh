@@ -614,10 +614,23 @@ show_menu() {
     clear
     print_title "Panbox-Search 网盘资源管理系统 v${VERSION}"
 
+    local docker_version="未检测到"
+    local compose_version="未检测到"
+
+    if command -v docker &> /dev/null; then
+        docker_version=$(docker --version | cut -d',' -f1)
+        if [ -z "$COMPOSE_CMD" ]; then
+            check_docker_compose > /dev/null 2>&1 || true
+        fi
+        if [ -n "$COMPOSE_CMD" ]; then
+            compose_version="$COMPOSE_CMD"
+        fi
+    fi
+
     echo -e "\n💻 系统环境："
     echo -e "    📌 System   $(uname -s) $(uname -r)"
-    echo -e "    📌 Docker   $(docker --version | cut -d',' -f1)"
-    echo -e "    📌 Compose  $COMPOSE_CMD"
+    echo -e "    📌 Docker   ${docker_version}"
+    echo -e "    📌 Compose  ${compose_version}"
 
     echo -e "\n📋 请选择操作："
     echo -e "\n    1️⃣  安装 Panbox-Search 系统"
@@ -757,6 +770,11 @@ else
             echo ""
             show_deployment_info
             ;;
+        "update")
+            update_system
+            echo ""
+            show_deployment_info
+            ;;
         "start"|"stop"|"restart")
             if [ -d "${PANBOX_DIR}" ]; then
                 check_docker_permissions
@@ -766,7 +784,7 @@ else
             fi
             ;;
         *)
-            echo "用法: $0 {install|start|stop|restart}"
+            echo "用法: $0 {install|update|start|stop|restart}"
             echo "或者直接运行 $0 进入交互式菜单"
             exit 1
             ;;
