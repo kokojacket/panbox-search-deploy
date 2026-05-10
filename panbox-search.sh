@@ -417,8 +417,8 @@ update_system() {
     configure_env  # 检查并补全 .env 配置
     log "📦 正在拉取最新 Docker 镜像..."
     execute_compose "pull" "false"
-    log "🚀 正在启动容器服务..."
-    execute_compose "up -d" "false"
+    log "🚀 正在重建并启动容器服务..."
+    execute_compose "up -d --force-recreate" "false"
 }
 
 # 安装系统
@@ -434,8 +434,8 @@ install_system() {
     cd "${PANBOX_DIR}"
     log "📦 正在拉取 Docker 镜像..."
     execute_compose "pull" "false"
-    log "🚀 正在启动容器服务..."
-    execute_compose "up -d" "false"
+    log "🚀 正在重建并启动容器服务..."
+    execute_compose "up -d --force-recreate" "false"
 }
 
 # 未安装时提示是否立即安装（仅交互模式）
