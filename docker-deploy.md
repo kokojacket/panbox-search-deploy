@@ -48,8 +48,15 @@ services:
       DATABASE_DEBUG: 'false'
       DATABASE_PREFIX: 'qf_'
       LANG_DEFAULT_LANG: 'zh-cn'
+      CACHE_DRIVER: 'redis'
+      REDIS_HOST: 'redis'
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: ''
+      REDIS_SELECT: '0'
+      REDIS_PREFIX: 'panbox:'
     depends_on:
       - mysql
+      - redis
     networks:
       - panbox-network
     restart: always
@@ -70,15 +77,27 @@ services:
       - panbox-network
     restart: always
 
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - panbox-network
+    restart: always
+
 networks:
   panbox-network:
     driver: bridge
 
 volumes:
   mysql-data:
+  redis-data:
 ```
 
 > 注意：请将`ghcr.io/用户名/panbox-search:latest`中的"用户名"替换为实际的GitHub用户名。
+>
+> Docker 部署默认使用 Redis 支撑搜索缓存、限流计数和自动封禁状态；如需回退文件缓存，可设置 `CACHE_DRIVER=file`。
 
 4. 登录到GitHub Container Registry
 
@@ -246,8 +265,16 @@ services:
       - "80:80"
     volumes:
       - ./storage/logs:/var/www/html/storage/logs
+    environment:
+      CACHE_DRIVER: 'redis'
+      REDIS_HOST: 'redis'
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: ''
+      REDIS_SELECT: '0'
+      REDIS_PREFIX: 'panbox:'
     depends_on:
       - mysql
+      - redis
     networks:
       - panbox-network
     restart: always
@@ -268,12 +295,22 @@ services:
       - panbox-network
     restart: always
 
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - panbox-network
+    restart: always
+
 networks:
   panbox-network:
     driver: bridge
 
 volumes:
   mysql-data:
+  redis-data:
 ```
 
 5. 启动容器：

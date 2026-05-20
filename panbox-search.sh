@@ -6,7 +6,16 @@
 # ============================================
 
 VERSION="2.0.0"
+SCRIPT_VERSION="2026.05.20.1"
 AUTHOR="Kokojacket"
+SELF_UPDATE_RESTARTED_ENV="PANBOX_SEARCH_SCRIPT_SELF_UPDATED"
+SCRIPT_URLS=(
+    "https://gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search.sh"
+    "https://hk.gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search.sh"
+    "https://cdn.gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search.sh"
+    "https://edgeone.gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search.sh"
+    "https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search.sh"
+)
 
 # 设置错误处理
 set -e
@@ -64,6 +73,134 @@ print_title() {
     print_line
     echo -e "${GREEN}                            ${title}${NC}"
     print_line
+}
+
+get_script_path() {
+    if [ ! -f "$0" ]; then
+        return 1
+    fi
+
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)" || return 1
+    printf "%s/%s\n" "$script_dir" "$(basename "$0")"
+}
+
+extract_script_version() {
+    local script_file="$1"
+    grep -m1 '^SCRIPT_VERSION=' "$script_file" | sed -E 's/^SCRIPT_VERSION="?([^"[:space:]]+)"?.*/\1/'
+}
+
+download_with_retry() {
+    local output_file="$1"
+    shift
+
+    local max_retries=3
+    local retry_delay=1
+    local source_index=1
+    local total_sources=$#
+
+    for url in "$@"; do
+        local source_name="GitHub 原始地址"
+        if [[ "$url" == *"hk.gh-proxy.org"* ]]; then
+            source_name="香港代理"
+        elif [[ "$url" == *"cdn.gh-proxy.org"* ]]; then
+            source_name="CDN 代理"
+        elif [[ "$url" == *"edgeone.gh-proxy.org"* ]]; then
+            source_name="EdgeOne 代理"
+        elif [[ "$url" == *"gh-proxy.org"* ]]; then
+            source_name="gh-proxy.org 代理"
+        fi
+
+        local attempt=1
+        while [ $attempt -le $max_retries ]; do
+            info "[$source_index/$total_sources] 下载尝试 (${attempt}/${max_retries}): ${source_name}"
+            if curl -4 -fSsL --connect-timeout 3 --max-time 8 "$url" -o "$output_file"; then
+                return 0
+            fi
+
+            if [ $attempt -lt $max_retries ]; then
+                warning "下载超时或失败，${retry_delay} 秒后重试..."
+                sleep $retry_delay
+            fi
+            attempt=$((attempt + 1))
+        done
+
+        warning "当前地址连续失败，切换下一个下载源..."
+        source_index=$((source_index + 1))
+    done
+
+    return 1
+}
+
+self_update_script() {
+    local script_path="$1"
+    local new_script="$2"
+    local backup_path="${script_path}.bak"
+    shift 2
+
+    if ! bash -n "$new_script"; then
+        error "远端脚本语法检查失败，已取消自更新"
+        return 1
+    fi
+
+    cp "$script_path" "$backup_path" || {
+        error "备份当前脚本失败，无法继续自更新"
+        return 1
+    }
+
+    chmod +x "$new_script"
+    if ! mv "$new_script" "$script_path"; then
+        error "替换当前脚本失败，可能没有写入权限"
+        return 1
+    fi
+
+    success "脚本已更新，旧版本备份为：$backup_path"
+    info "正在使用最新脚本重新启动..."
+    export "$SELF_UPDATE_RESTARTED_ENV=1"
+    exec "$script_path" "$@"
+}
+
+check_and_force_self_update() {
+    if [ "${!SELF_UPDATE_RESTARTED_ENV:-0}" = "1" ]; then
+        return 0
+    fi
+
+    local script_path
+    script_path="$(get_script_path)" || {
+        error "当前脚本不是从本地文件运行，无法执行强制自更新"
+        exit 1
+    }
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+
+    info "检查部署脚本更新..."
+    if ! download_with_retry "$tmp_file" "${SCRIPT_URLS[@]}"; then
+        rm -f "$tmp_file"
+        error "脚本更新检查失败，已停止执行以避免使用过期脚本"
+        exit 1
+    fi
+
+    local remote_version
+    remote_version="$(extract_script_version "$tmp_file")"
+    if [ -z "$remote_version" ]; then
+        rm -f "$tmp_file"
+        error "无法识别远端脚本版本，已停止执行以避免使用过期脚本"
+        exit 1
+    fi
+
+    if [ "$remote_version" = "$SCRIPT_VERSION" ]; then
+        rm -f "$tmp_file"
+        success "部署脚本已是最新版本：$SCRIPT_VERSION"
+        return 0
+    fi
+
+    warning "检测到部署脚本更新：当前 $SCRIPT_VERSION → 最新 $remote_version"
+    if ! self_update_script "$script_path" "$tmp_file" "$@"; then
+        rm -f "$tmp_file"
+        error "脚本自更新失败，已停止执行以避免使用过期脚本"
+        exit 1
+    fi
 }
 
 # Docker 权限检查
@@ -253,6 +390,7 @@ create_directories() {
     mkdir -p "${PANBOX_DIR}/app/uploads"
     mkdir -p "${PANBOX_DIR}/app/install"
     mkdir -p "${PANBOX_DIR}/mysql"
+    mkdir -p "${PANBOX_DIR}/redis"
 
     chmod -R 777 "${PANBOX_DIR}"
 
@@ -261,6 +399,7 @@ create_directories() {
     info "  - 应用数据: ${PANBOX_DIR}/app/"
     info "  - License 数据: ${PANBOX_DIR}/app/data/"
     info "  - 数据库数据: ${PANBOX_DIR}/mysql/"
+    info "  - Redis 数据: ${PANBOX_DIR}/redis/"
 }
 
 # 下载 docker-compose.yml
@@ -342,6 +481,7 @@ configure_env() {
     # 检查 .env 文件是否已存在
     if [ -f ".env" ]; then
         warning ".env 配置文件已存在"
+        local env_updated=false
 
         # 检查是否缺少 APP_PORT 配置
         if ! grep -q "^APP_PORT" .env; then
@@ -355,23 +495,36 @@ configure_env() {
                 success "找到可用端口: ${APP_PORT}"
             fi
 
-            # 在文件开头插入 APP_PORT
-            if command -v sed &> /dev/null; then
-                # 使用临时文件方式（兼容性更好）
-                echo "APP_PORT=${APP_PORT}" > .env.tmp
-                echo "" >> .env.tmp
-                cat .env >> .env.tmp
-                mv .env.tmp .env
-                success "已补全 APP_PORT=${APP_PORT}"
-            else
-                warning "sed 命令不可用，无法自动补全 APP_PORT"
-            fi
+            echo "APP_PORT=${APP_PORT}" > .env.tmp
+            echo "" >> .env.tmp
+            cat .env >> .env.tmp
+            mv .env.tmp .env
+            success "已补全 APP_PORT=${APP_PORT}"
+            env_updated=true
+        fi
+
+        # 检查是否缺少缓存配置
+        if ! grep -q "^CACHE_DRIVER" .env; then
+            warning "检测到 .env 缺少缓存配置，正在补全 Redis 默认配置..."
+            cat >> .env <<EOF
+
+# ==================== 缓存配置 ====================
+# Docker 部署默认使用 Redis；如需回退文件缓存，可改为 file
+CACHE_DRIVER=redis
+REDIS_PASSWORD=
+REDIS_SELECT=0
+REDIS_PREFIX=panbox:
+EOF
+            success "已补全 Redis 缓存配置"
+            env_updated=true
+        fi
+
+        if [ "$env_updated" = true ]; then
             info ".env 配置已更新"
-            return 0
         else
             info ".env 配置完整，跳过配置"
-            return 0
         fi
+        return 0
     fi
 
     info "正在检测可用端口..."
@@ -385,6 +538,13 @@ configure_env() {
 # ==========================================
 # 应用端口（宿主机端口）
 APP_PORT=${APP_PORT}
+
+# ==================== 缓存配置 ====================
+# Docker 部署默认使用 Redis；如需回退文件缓存，可改为 file
+CACHE_DRIVER=redis
+REDIS_PASSWORD=
+REDIS_SELECT=0
+REDIS_PREFIX=panbox:
 
 # ==========================================
 # 说明：
@@ -631,6 +791,7 @@ show_menu() {
     echo -e "    📌 System   $(uname -s) $(uname -r)"
     echo -e "    📌 Docker   ${docker_version}"
     echo -e "    📌 Compose  ${compose_version}"
+    echo -e "    📌 Script   ${SCRIPT_VERSION}"
 
     echo -e "\n📋 请选择操作："
     echo -e "\n    1️⃣  安装 Panbox-Search 系统"
@@ -752,6 +913,8 @@ validate_input() {
     fi
     return 0
 }
+
+check_and_force_self_update "$@"
 
 # 检查是否传入了命令行参数
 if [ $# -eq 0 ]; then

@@ -2,7 +2,7 @@
 
 本文件记录 `deploy` 子仓库的主要变更（含未提交代码）。
 
-## [Unreleased] - 2026-02-13
+## [Unreleased] - 2026-05-21
 
 ### Changed
 - `docker-compose.yml`：新增 `/var/www/html/data` 持久化挂载（`/opt/panbox-search/app/data`），用于保存设备 UUID 等关键标识。
@@ -16,6 +16,11 @@
 - `panbox-search.sh`：外网地址探测改为仅获取 IPv4（`curl -4` + IPv4 格式校验），避免误显示 IPv6 地址。
 - `panbox-search.sh`：修复部署完成阶段公网 IP 获取失败导致脚本提前退出的问题（在 `set -e` 下改为非致命并限制 3 秒超时）。
 - `panbox-search.sh`：精简部署完成区域的分割线与冗余提示，保留关键状态和最终访问路径，提升终端可读性。
+- `docker-compose.yml`：新增 Redis 服务与 `/opt/panbox-search/redis` 持久化目录，Docker 部署默认使用 Redis 缓存。
+- `.env.example`：新增 `CACHE_DRIVER` 与 `REDIS_*` 配置，支持回退到文件缓存。
+- `panbox-search.sh`：安装与更新流程补齐 Redis 数据目录和缓存环境变量，避免旧 `.env` 缺少缓存配置。
+- `panbox-search.sh`：新增 `SCRIPT_VERSION` 脚本版本号与启动前强制自更新检查，自动从多下载源获取最新脚本、语法校验后替换并重启，避免用户使用过期脚本更新。
+- `README.md` / `docker-deploy.md`：补充 Redis 默认缓存、持久化路径与文件缓存回退说明。
 
 ## [bab1c83] - 2026-02-12
 
