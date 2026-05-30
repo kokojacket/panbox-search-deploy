@@ -2,6 +2,15 @@
 
 本文件记录 `deploy` 子仓库的主要变更（含未提交代码）。
 
+## [Unreleased] - 2026-05-30
+
+### Fixed
+- `panbox-search.sh`：修复更新时 MySQL 报 `InnoDB: Unable to lock ./ibdata1 error: 11` 且宿主机残留多个 mysqld 进程的问题。更新流程由原先的 `up -d --force-recreate` 改为「先 `down --remove-orphans -t 60` 彻底停止旧容器、等待 MySQL 释放数据目录锁，再 `up -d --remove-orphans` 启动」，消除新旧 mysqld 同时打开同一份数据目录的抢锁窗口。
+
+### Changed
+- `panbox-search.sh`：安装、启动、停止、重启流程统一加 `--remove-orphans` 清理孤儿容器；停止/重启使用 `-t 60` 给 MySQL 足够的优雅关闭时间，避免被默认 10 秒超时强杀后触发下次启动的 crash recovery。
+- `panbox-search.sh`：`SCRIPT_VERSION` 升级到 `2026.05.30.1`，触发用户端强制自更新拉取上述修复。
+
 ## [Unreleased] - 2026-05-21
 
 ### Changed

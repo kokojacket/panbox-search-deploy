@@ -6,7 +6,7 @@
 # ============================================
 
 VERSION="2.0.0"
-SCRIPT_VERSION="2026.05.20.1"
+SCRIPT_VERSION="2026.05.30.1"
 AUTHOR="Kokojacket"
 SELF_UPDATE_RESTARTED_ENV="PANBOX_SEARCH_SCRIPT_SELF_UPDATED"
 SCRIPT_URLS=(
@@ -577,8 +577,13 @@ update_system() {
     configure_env  # 检查并补全 .env 配置
     log "📦 正在拉取最新 Docker 镜像..."
     execute_compose "pull" "false"
-    log "🚀 正在重建并启动容器服务..."
-    execute_compose "up -d --force-recreate" "false"
+    # 先彻底停止旧容器再启动，避免新旧 MySQL 同时打开同一份数据目录抢锁：
+    # - --remove-orphans 清理遗留/孤儿容器，杜绝双实例 mysqld 抢 ibdata1
+    # - -t 60 给 MySQL 足够的优雅关闭时间，确保 InnoDB 完成 flush 并释放数据目录锁
+    log "🛑 正在停止旧容器（确保 MySQL 完全退出并释放数据目录锁）..."
+    execute_compose "down --remove-orphans -t 60" "false"
+    log "🚀 正在启动容器服务..."
+    execute_compose "up -d --remove-orphans" "false"
 }
 
 # 安装系统
@@ -594,8 +599,8 @@ install_system() {
     cd "${PANBOX_DIR}"
     log "📦 正在拉取 Docker 镜像..."
     execute_compose "pull" "false"
-    log "🚀 正在重建并启动容器服务..."
-    execute_compose "up -d --force-recreate" "false"
+    log "🚀 正在启动容器服务..."
+    execute_compose "up -d --remove-orphans" "false"
 }
 
 # 未安装时提示是否立即安装（仅交互模式）
@@ -691,16 +696,18 @@ manage_service() {
     case $action in
         "start")
             log "启动 Panbox-Search 服务..."
-            execute_compose "up -d" "false"
+            execute_compose "up -d --remove-orphans" "false"
             ;;
         "stop")
             log "停止 Panbox-Search 服务..."
-            execute_compose "down" "false"
+            # -t 60 给 MySQL 足够的优雅关闭时间，避免被强杀触发下次启动的 crash recovery
+            execute_compose "down --remove-orphans -t 60" "false"
             ;;
         "restart")
             log "重启 Panbox-Search 服务..."
-            execute_compose "down" "false"
-            execute_compose "up -d" "false"
+            # 先彻底停止再启动，-t 60 确保 MySQL 完成 InnoDB flush 并释放数据目录锁
+            execute_compose "down --remove-orphans -t 60" "false"
+            execute_compose "up -d --remove-orphans" "false"
             ;;
         *)
             error "无效的操作: $action"
