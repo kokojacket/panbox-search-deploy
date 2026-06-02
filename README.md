@@ -10,6 +10,22 @@ chmod +x panbox-search.sh
 ./panbox-search.sh
 ```
 
+## 🧪 Beta 测试版部署
+
+Beta 版本使用独立安装目录、容器名、网络与默认端口，不会覆盖正式版部署。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh -o panbox-search-beta.sh
+chmod +x panbox-search-beta.sh
+./panbox-search-beta.sh
+```
+
+默认配置：
+
+- 镜像：`kokojacket/panbox-search:beta`
+- 安装目录：`/opt/panbox-search-beta`
+- 默认端口：从 `8088` 开始自动查找可用端口
+
 ---
 
 ## 📋 系统要求

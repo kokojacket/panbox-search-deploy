@@ -2,6 +2,13 @@
 
 本文件记录 `deploy` 子仓库的主要变更（含未提交代码）。
 
+## [Unreleased] - 2026-06-02
+
+### Added
+- 新增 `panbox-search-beta.sh` Beta 一键部署脚本，默认安装到 `/opt/panbox-search-beta`，使用 `kokojacket/panbox-search:beta` 镜像，并支持 `install/update/start/stop/restart`。
+- 新增 `docker-compose-beta.yml` Beta Compose 模板，使用独立容器名、网络、数据目录与默认端口，避免覆盖正式版部署。
+- `README.md` 补充 Beta 测试版部署命令与默认配置说明。
+
 ## [Unreleased] - 2026-05-30
 
 ### Fixed
