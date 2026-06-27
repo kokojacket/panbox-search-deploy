@@ -6,7 +6,15 @@
 
 set -e
 
-SCRIPT_VERSION="2026.06.27.1"
+SCRIPT_VERSION="2026.06.27.2"
+SELF_UPDATE_RESTARTED_ENV="PANBOX_SEARCH_BETA_SCRIPT_SELF_UPDATED"
+SCRIPT_URLS=(
+    "https://gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
+    "https://hk.gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
+    "https://cdn.gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
+    "https://edgeone.gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
+    "https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
+)
 PANBOX_DIR="/opt/panbox-search-beta"
 COMPOSE_FILE="docker-compose.yml"
 DEFAULT_IMAGE="kokojacket/panbox-search:beta"
@@ -38,6 +46,134 @@ warning() {
 
 success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+get_script_path() {
+    if [ ! -f "$0" ]; then
+        return 1
+    fi
+
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)" || return 1
+    printf "%s/%s\n" "$script_dir" "$(basename "$0")"
+}
+
+extract_script_version() {
+    local script_file="$1"
+    grep -m1 '^SCRIPT_VERSION=' "$script_file" | sed -E 's/^SCRIPT_VERSION="?([^"[:space:]]+)"?.*/\1/'
+}
+
+download_with_retry() {
+    local output_file="$1"
+    shift
+
+    local max_retries=3
+    local retry_delay=1
+    local source_index=1
+    local total_sources=$#
+
+    for url in "$@"; do
+        local source_name="GitHub 原始地址"
+        if [[ "$url" == *"hk.gh-proxy.org"* ]]; then
+            source_name="香港代理"
+        elif [[ "$url" == *"cdn.gh-proxy.org"* ]]; then
+            source_name="CDN 代理"
+        elif [[ "$url" == *"edgeone.gh-proxy.org"* ]]; then
+            source_name="EdgeOne 代理"
+        elif [[ "$url" == *"gh-proxy.org"* ]]; then
+            source_name="gh-proxy.org 代理"
+        fi
+
+        local attempt=1
+        while [ $attempt -le $max_retries ]; do
+            info "[$source_index/$total_sources] 下载尝试 (${attempt}/${max_retries}): ${source_name}"
+            if curl -4 -fSsL --connect-timeout 3 --max-time 8 "$url" -o "$output_file"; then
+                return 0
+            fi
+
+            if [ $attempt -lt $max_retries ]; then
+                warning "下载超时或失败，${retry_delay} 秒后重试..."
+                sleep $retry_delay
+            fi
+            attempt=$((attempt + 1))
+        done
+
+        warning "当前地址连续失败，切换下一个下载源..."
+        source_index=$((source_index + 1))
+    done
+
+    return 1
+}
+
+self_update_script() {
+    local script_path="$1"
+    local new_script="$2"
+    local backup_path="${script_path}.bak"
+    shift 2
+
+    if ! bash -n "$new_script"; then
+        error "远端脚本语法检查失败，已取消自更新"
+        return 1
+    fi
+
+    cp "$script_path" "$backup_path" || {
+        error "备份当前脚本失败，无法继续自更新"
+        return 1
+    }
+
+    chmod +x "$new_script"
+    if ! mv "$new_script" "$script_path"; then
+        error "替换当前脚本失败，可能没有写入权限"
+        return 1
+    fi
+
+    success "脚本已更新，旧版本备份为：$backup_path"
+    info "正在使用最新脚本重新启动..."
+    export "$SELF_UPDATE_RESTARTED_ENV=1"
+    exec "$script_path" "$@"
+}
+
+check_and_force_self_update() {
+    if [ "${!SELF_UPDATE_RESTARTED_ENV:-0}" = "1" ]; then
+        return 0
+    fi
+
+    local script_path
+    script_path="$(get_script_path)" || {
+        error "当前脚本不是从本地文件运行，无法执行强制自更新"
+        exit 1
+    }
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+
+    info "检查 Beta 部署脚本更新..."
+    if ! download_with_retry "$tmp_file" "${SCRIPT_URLS[@]}"; then
+        rm -f "$tmp_file"
+        error "脚本更新检查失败，已停止执行以避免使用过期脚本"
+        exit 1
+    fi
+
+    local remote_version
+    remote_version="$(extract_script_version "$tmp_file")"
+    if [ -z "$remote_version" ]; then
+        rm -f "$tmp_file"
+        error "无法识别远端脚本版本，已停止执行以避免使用过期脚本"
+        exit 1
+    fi
+
+    if [ "$remote_version" = "$SCRIPT_VERSION" ]; then
+        rm -f "$tmp_file"
+        success "Beta 部署脚本已是最新版本：$SCRIPT_VERSION"
+        return 0
+    fi
+
+    warning "检测到 Beta 部署脚本更新：当前 $SCRIPT_VERSION → 最新 $remote_version"
+    if ! self_update_script "$script_path" "$tmp_file" "$@"; then
+        rm -f "$tmp_file"
+        error "脚本自更新失败，已停止执行以避免使用过期脚本"
+        exit 1
+    fi
 }
 
 generate_internal_token() {
@@ -399,6 +535,8 @@ show_info() {
     info "访问地址：http://127.0.0.1:${app_port}"
     info "查看日志：cd $PANBOX_DIR && $COMPOSE_CMD logs -f app"
 }
+
+check_and_force_self_update "$@"
 
 case "${1:-install}" in
     install)
