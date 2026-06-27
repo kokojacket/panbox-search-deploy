@@ -23,6 +23,13 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_SELECT=${REDIS_SELECT:-0}
       - REDIS_PREFIX=${REDIS_PREFIX:-panbox-beta:}
+      - PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-change-me}
+      - OPENILINK_MONITOR_ENABLED=false
+      - APACHE_SERVER_LIMIT=${APACHE_SERVER_LIMIT:-32}
+      - APACHE_MAX_REQUEST_WORKERS=${APACHE_MAX_REQUEST_WORKERS:-32}
+      - APACHE_START_SERVERS=${APACHE_START_SERVERS:-4}
+      - APACHE_MIN_SPARE_SERVERS=${APACHE_MIN_SPARE_SERVERS:-4}
+      - APACHE_MAX_SPARE_SERVERS=${APACHE_MAX_SPARE_SERVERS:-8}
     volumes:
       - /opt/panbox-search-beta/app/runtime:/var/www/html/runtime
       - /opt/panbox-search-beta/app/data:/var/www/html/data
@@ -55,6 +62,32 @@ services:
       - --default-authentication-plugin=mysql_native_password
       - --max_connections=1000
       - --max_allowed_packet=128M
+
+  openilink-poller:
+    image: ${PANBOX_POLLER_IMAGE:-kokojacket/panbox-openilink-poller:beta}
+    container_name: panbox-search-beta-openilink-poller
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=panbox-search
+      - MYSQL_USER=panbox-search
+      - MYSQL_PASSWORD=panbox-search
+      - MYSQL_PREFIX=qf_
+      - PANBOX_INTERNAL_BASE_URL=http://app
+      - PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-change-me}
+      - OPENILINK_MAX_CONCURRENCY=${OPENILINK_MAX_CONCURRENCY:-300}
+      - OPENILINK_CLAIM_LIMIT=${OPENILINK_CLAIM_LIMIT:-300}
+      - OPENILINK_LEASE_TTL=${OPENILINK_LEASE_TTL:-30}
+      - OPENILINK_POLL_TIMEOUT_MS=${OPENILINK_POLL_TIMEOUT_MS:-1000}
+      - OPENILINK_IDLE_SLEEP=${OPENILINK_IDLE_SLEEP:-3}
+      - OPENILINK_HTTP_TIMEOUT=${OPENILINK_HTTP_TIMEOUT:-15}
+      - OPENILINK_BACKEND_TIMEOUT=${OPENILINK_BACKEND_TIMEOUT:-120}
+    depends_on:
+      - app
+      - mysql
+    networks:
+      - panbox-search-beta-network
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine

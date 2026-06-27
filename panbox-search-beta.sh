@@ -6,10 +6,11 @@
 
 set -e
 
-SCRIPT_VERSION="2026.06.02.1"
+SCRIPT_VERSION="2026.06.27.1"
 PANBOX_DIR="/opt/panbox-search-beta"
 COMPOSE_FILE="docker-compose.yml"
 DEFAULT_IMAGE="kokojacket/panbox-search:beta"
+DEFAULT_POLLER_IMAGE="kokojacket/panbox-openilink-poller:beta"
 COMPOSE_CMD=""
 NEED_SUDO=false
 
@@ -37,6 +38,14 @@ warning() {
 
 success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+generate_internal_token() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+        return
+    fi
+    date +%s%N | sha256sum | awk '{print $1}'
 }
 
 check_docker() {
@@ -146,6 +155,41 @@ write_env_file() {
 
     if [ -f ".env" ]; then
         info ".env 已存在，保留现有配置。"
+        local env_updated=false
+
+        if ! grep -q "^PANBOX_POLLER_IMAGE=" .env; then
+            echo "PANBOX_POLLER_IMAGE=${PANBOX_POLLER_IMAGE:-$DEFAULT_POLLER_IMAGE}" >> .env
+            env_updated=true
+        fi
+
+        if ! grep -q "^PANBOX_INTERNAL_TOKEN=" .env; then
+            echo "PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-$(generate_internal_token)}" >> .env
+            env_updated=true
+        fi
+        if ! grep -q "^OPENILINK_MAX_CONCURRENCY=" .env; then
+            echo "OPENILINK_MAX_CONCURRENCY=${OPENILINK_MAX_CONCURRENCY:-300}" >> .env
+            env_updated=true
+        fi
+        if ! grep -q "^OPENILINK_CLAIM_LIMIT=" .env; then
+            echo "OPENILINK_CLAIM_LIMIT=${OPENILINK_CLAIM_LIMIT:-300}" >> .env
+            env_updated=true
+        fi
+        if ! grep -q "^OPENILINK_POLL_TIMEOUT_MS=" .env; then
+            echo "OPENILINK_POLL_TIMEOUT_MS=${OPENILINK_POLL_TIMEOUT_MS:-1000}" >> .env
+            env_updated=true
+        fi
+        if ! grep -q "^OPENILINK_IDLE_SLEEP=" .env; then
+            echo "OPENILINK_IDLE_SLEEP=${OPENILINK_IDLE_SLEEP:-3}" >> .env
+            env_updated=true
+        fi
+        if ! grep -q "^OPENILINK_BACKEND_TIMEOUT=" .env; then
+            echo "OPENILINK_BACKEND_TIMEOUT=${OPENILINK_BACKEND_TIMEOUT:-120}" >> .env
+            env_updated=true
+        fi
+
+        if [ "$env_updated" = true ]; then
+            success ".env 已补充 OpenIlink Poller 配置。"
+        fi
         return 0
     fi
 
@@ -155,10 +199,22 @@ write_env_file() {
     cat > .env <<EOF
 APP_PORT=${app_port}
 PANBOX_IMAGE=${PANBOX_IMAGE:-$DEFAULT_IMAGE}
+PANBOX_POLLER_IMAGE=${PANBOX_POLLER_IMAGE:-$DEFAULT_POLLER_IMAGE}
+PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-$(generate_internal_token)}
 CACHE_DRIVER=${CACHE_DRIVER:-redis}
 REDIS_PASSWORD=${REDIS_PASSWORD:-}
 REDIS_SELECT=${REDIS_SELECT:-0}
 REDIS_PREFIX=${REDIS_PREFIX:-panbox-beta:}
+APACHE_SERVER_LIMIT=${APACHE_SERVER_LIMIT:-32}
+APACHE_MAX_REQUEST_WORKERS=${APACHE_MAX_REQUEST_WORKERS:-32}
+APACHE_START_SERVERS=${APACHE_START_SERVERS:-4}
+APACHE_MIN_SPARE_SERVERS=${APACHE_MIN_SPARE_SERVERS:-4}
+APACHE_MAX_SPARE_SERVERS=${APACHE_MAX_SPARE_SERVERS:-8}
+OPENILINK_MAX_CONCURRENCY=${OPENILINK_MAX_CONCURRENCY:-300}
+OPENILINK_CLAIM_LIMIT=${OPENILINK_CLAIM_LIMIT:-300}
+OPENILINK_POLL_TIMEOUT_MS=${OPENILINK_POLL_TIMEOUT_MS:-1000}
+OPENILINK_IDLE_SLEEP=${OPENILINK_IDLE_SLEEP:-3}
+OPENILINK_BACKEND_TIMEOUT=${OPENILINK_BACKEND_TIMEOUT:-120}
 EOF
 
     success "已生成 .env，应用端口：${app_port}"
@@ -192,6 +248,13 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_SELECT=${REDIS_SELECT:-0}
       - REDIS_PREFIX=${REDIS_PREFIX:-panbox-beta:}
+      - PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-change-me}
+      - OPENILINK_MONITOR_ENABLED=false
+      - APACHE_SERVER_LIMIT=${APACHE_SERVER_LIMIT:-32}
+      - APACHE_MAX_REQUEST_WORKERS=${APACHE_MAX_REQUEST_WORKERS:-32}
+      - APACHE_START_SERVERS=${APACHE_START_SERVERS:-4}
+      - APACHE_MIN_SPARE_SERVERS=${APACHE_MIN_SPARE_SERVERS:-4}
+      - APACHE_MAX_SPARE_SERVERS=${APACHE_MAX_SPARE_SERVERS:-8}
     volumes:
       - /opt/panbox-search-beta/app/runtime:/var/www/html/runtime
       - /opt/panbox-search-beta/app/data:/var/www/html/data
@@ -224,6 +287,32 @@ services:
       - --default-authentication-plugin=mysql_native_password
       - --max_connections=1000
       - --max_allowed_packet=128M
+
+  openilink-poller:
+    image: ${PANBOX_POLLER_IMAGE:-kokojacket/panbox-openilink-poller:beta}
+    container_name: panbox-search-beta-openilink-poller
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=panbox-search
+      - MYSQL_USER=panbox-search
+      - MYSQL_PASSWORD=panbox-search
+      - MYSQL_PREFIX=qf_
+      - PANBOX_INTERNAL_BASE_URL=http://app
+      - PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-change-me}
+      - OPENILINK_MAX_CONCURRENCY=${OPENILINK_MAX_CONCURRENCY:-300}
+      - OPENILINK_CLAIM_LIMIT=${OPENILINK_CLAIM_LIMIT:-300}
+      - OPENILINK_LEASE_TTL=${OPENILINK_LEASE_TTL:-30}
+      - OPENILINK_POLL_TIMEOUT_MS=${OPENILINK_POLL_TIMEOUT_MS:-1000}
+      - OPENILINK_IDLE_SLEEP=${OPENILINK_IDLE_SLEEP:-3}
+      - OPENILINK_HTTP_TIMEOUT=${OPENILINK_HTTP_TIMEOUT:-15}
+      - OPENILINK_BACKEND_TIMEOUT=${OPENILINK_BACKEND_TIMEOUT:-120}
+    depends_on:
+      - app
+      - mysql
+    networks:
+      - panbox-search-beta-network
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
