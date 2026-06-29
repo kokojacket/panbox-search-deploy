@@ -6,7 +6,7 @@
 # ============================================
 
 VERSION="2.0.0"
-SCRIPT_VERSION="2026.05.30.1"
+SCRIPT_VERSION="2026.06.26.1"
 AUTHOR="Kokojacket"
 SELF_UPDATE_RESTARTED_ENV="PANBOX_SEARCH_SCRIPT_SELF_UPDATED"
 SCRIPT_URLS=(
@@ -474,6 +474,14 @@ download_compose_file() {
 }
 
 # 配置环境变量
+generate_internal_token() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+        return
+    fi
+    date +%s%N | sha256sum | awk '{print $1}'
+}
+
 configure_env() {
     info "配置环境变量..."
     cd "${PANBOX_DIR}"
@@ -519,6 +527,40 @@ EOF
             env_updated=true
         fi
 
+        if ! grep -q "^APACHE_MAX_REQUEST_WORKERS" .env; then
+            warning "检测到 .env 缺少 Apache Worker 配置，正在补全..."
+            cat >> .env <<EOF
+
+# ==================== Apache Worker 配置 ====================
+APACHE_SERVER_LIMIT=32
+APACHE_MAX_REQUEST_WORKERS=32
+APACHE_START_SERVERS=4
+APACHE_MIN_SPARE_SERVERS=4
+APACHE_MAX_SPARE_SERVERS=8
+EOF
+            success "已补全 Apache Worker 配置"
+            env_updated=true
+        fi
+
+        if ! grep -q "^PANBOX_INTERNAL_TOKEN" .env; then
+            warning "检测到 .env 缺少内部接口密钥，正在生成..."
+            PANBOX_INTERNAL_TOKEN=$(generate_internal_token)
+            cat >> .env <<EOF
+
+# ==================== OpenIlink Poller 配置 ====================
+PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN}
+OPENILINK_MAX_CONCURRENCY=300
+OPENILINK_CLAIM_LIMIT=300
+OPENILINK_LEASE_TTL=45
+OPENILINK_POLL_TIMEOUT_MS=30000
+OPENILINK_HTTP_TIMEOUT=45
+OPENILINK_IDLE_SLEEP=3
+OPENILINK_BACKEND_TIMEOUT=120
+EOF
+            success "已生成 PANBOX_INTERNAL_TOKEN"
+            env_updated=true
+        fi
+
         if [ "$env_updated" = true ]; then
             info ".env 配置已更新"
         else
@@ -545,6 +587,23 @@ CACHE_DRIVER=redis
 REDIS_PASSWORD=
 REDIS_SELECT=0
 REDIS_PREFIX=panbox:
+
+# ==================== Apache Worker 配置 ====================
+APACHE_SERVER_LIMIT=32
+APACHE_MAX_REQUEST_WORKERS=32
+APACHE_START_SERVERS=4
+APACHE_MIN_SPARE_SERVERS=4
+APACHE_MAX_SPARE_SERVERS=8
+
+# ==================== OpenIlink Poller 配置 ====================
+PANBOX_INTERNAL_TOKEN=$(generate_internal_token)
+OPENILINK_MAX_CONCURRENCY=300
+OPENILINK_CLAIM_LIMIT=300
+OPENILINK_LEASE_TTL=45
+OPENILINK_POLL_TIMEOUT_MS=30000
+OPENILINK_HTTP_TIMEOUT=45
+OPENILINK_IDLE_SLEEP=3
+OPENILINK_BACKEND_TIMEOUT=120
 
 # ==========================================
 # 说明：

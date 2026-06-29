@@ -42,6 +42,16 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_SELECT=${REDIS_SELECT:-0}
       - REDIS_PREFIX=${REDIS_PREFIX:-panbox:}
+      # 内部接口鉴权
+      - PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-change-me}
+      - OPENILINK_MONITOR_ENABLED=false
+
+      # Apache Worker 配置
+      - APACHE_SERVER_LIMIT=${APACHE_SERVER_LIMIT:-32}
+      - APACHE_MAX_REQUEST_WORKERS=${APACHE_MAX_REQUEST_WORKERS:-32}
+      - APACHE_START_SERVERS=${APACHE_START_SERVERS:-4}
+      - APACHE_MIN_SPARE_SERVERS=${APACHE_MIN_SPARE_SERVERS:-4}
+      - APACHE_MAX_SPARE_SERVERS=${APACHE_MAX_SPARE_SERVERS:-8}
 
     # 数据持久化
     volumes:
@@ -102,6 +112,33 @@ services:
       - --default-authentication-plugin=mysql_native_password
       - --max_connections=1000
       - --max_allowed_packet=128M
+
+  # ==================== OpenIlink 独立轮询服务 ====================
+  openilink-poller:
+    image: kokojacket/panbox-openilink-poller:latest
+    container_name: panbox-openilink-poller
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=panbox-search
+      - MYSQL_USER=panbox-search
+      - MYSQL_PASSWORD=panbox-search
+      - MYSQL_PREFIX=qf_
+      - PANBOX_INTERNAL_BASE_URL=http://app
+      - PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-change-me}
+      - OPENILINK_MAX_CONCURRENCY=${OPENILINK_MAX_CONCURRENCY:-300}
+      - OPENILINK_CLAIM_LIMIT=${OPENILINK_CLAIM_LIMIT:-300}
+      - OPENILINK_LEASE_TTL=${OPENILINK_LEASE_TTL:-45}
+      - OPENILINK_POLL_TIMEOUT_MS=${OPENILINK_POLL_TIMEOUT_MS:-30000}
+      - OPENILINK_IDLE_SLEEP=${OPENILINK_IDLE_SLEEP:-3}
+      - OPENILINK_HTTP_TIMEOUT=${OPENILINK_HTTP_TIMEOUT:-45}
+      - OPENILINK_BACKEND_TIMEOUT=${OPENILINK_BACKEND_TIMEOUT:-120}
+    depends_on:
+      - app
+      - mysql
+    networks:
+      - panbox-search-network
+    restart: unless-stopped
 
   # ==================== Redis 缓存 ====================
   redis:

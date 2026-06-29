@@ -2,6 +2,15 @@
 
 本文件记录 `deploy` 子仓库的主要变更（含未提交代码）。
 
+## [Unreleased] - 2026-06-29
+
+### Added
+- 正式版 `docker-compose.yml` 新增 OpenIlink 独立 Poller 服务，并补齐 app 与 poller 共享的内部接口密钥配置。
+- 正式版 `.env.example` 与 `panbox-search.sh` 新增 OpenIlink Poller、Apache Worker 环境变量，旧 `.env` 缺失时自动补齐。
+
+### Changed
+- 正式版 OpenIlink Poller 默认长轮询参数对齐当前主仓库推荐配置，提升微信机器人消息轮询稳定性。
+
 ## [Unreleased] - 2026-06-02
 
 ### Added
