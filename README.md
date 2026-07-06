@@ -26,6 +26,22 @@ chmod +x panbox-search-beta.sh
 - 安装目录：`/opt/panbox-search-beta`
 - 默认端口：从 `8088` 开始自动查找可用端口
 
+## 🧪 PHP 8.4 迁移验证部署
+
+PHP 8.4 版本使用独立安装目录、容器名、网络与默认端口，不会覆盖正式版或 Beta 部署。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-php84.sh -o panbox-search-php84.sh
+chmod +x panbox-search-php84.sh
+./panbox-search-php84.sh
+```
+
+默认配置：
+
+- 镜像：`kokojacket/panbox-search:php-8.4`
+- 安装目录：`/opt/panbox-search-php84`
+- 默认端口：从 `8094` 开始自动查找可用端口
+
 ---
 
 ## 📋 系统要求

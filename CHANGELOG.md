@@ -5,6 +5,9 @@
 ## [Unreleased] - 2026-06-29
 
 ### Added
+- 新增 `panbox-search-php84.sh` PHP 8.4 迁移验证一键部署脚本，默认安装到 `/opt/panbox-search-php84`，使用 `kokojacket/panbox-search:php-8.4` 镜像。
+- 新增 `docker-compose-php84.yml` PHP 8.4 Compose 模板，使用独立容器名、网络、数据目录与默认端口，避免覆盖正式版和 Beta 部署。
+- `README.md` 补充 PHP 8.4 迁移验证部署命令与默认配置说明。
 - 正式版 `docker-compose.yml` 新增 OpenIlink 独立 Poller 服务，并补齐 app 与 poller 共享的内部接口密钥配置。
 - 正式版 `.env.example` 与 `panbox-search.sh` 新增 OpenIlink Poller、Apache Worker 环境变量，旧 `.env` 缺失时自动补齐。
 

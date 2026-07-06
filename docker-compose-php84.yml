@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  app:
+    image: ${PANBOX_IMAGE:-kokojacket/panbox-search:php-8.4}
+    container_name: panbox-search-php84-app
+    ports:
+      - "${APP_PORT:-8094}:80"
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=panbox-search
+      - DB_USER=panbox-search
+      - DB_PASSWORD=panbox-search
+      - DB_PREFIX=qf_
+      - APP_DEBUG=false
+      - APP_TIMEZONE=Asia/Shanghai
+      - SYSTEM_SALT=Panbox Search PHP 8.4
+      - SITE_NAME=Panbox Search PHP 8.4
+      - CACHE_DRIVER=${CACHE_DRIVER:-redis}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_SELECT=${REDIS_SELECT:-0}
+      - REDIS_PREFIX=${REDIS_PREFIX:-panbox-php84:}
+      - PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-change-me}
+      - OPENILINK_MONITOR_ENABLED=false
+      - APACHE_SERVER_LIMIT=${APACHE_SERVER_LIMIT:-32}
+      - APACHE_MAX_REQUEST_WORKERS=${APACHE_MAX_REQUEST_WORKERS:-32}
+      - APACHE_START_SERVERS=${APACHE_START_SERVERS:-4}
+      - APACHE_MIN_SPARE_SERVERS=${APACHE_MIN_SPARE_SERVERS:-4}
+      - APACHE_MAX_SPARE_SERVERS=${APACHE_MAX_SPARE_SERVERS:-8}
+    volumes:
+      - /opt/panbox-search-php84/app/runtime:/var/www/html/runtime
+      - /opt/panbox-search-php84/app/data:/var/www/html/data
+      - /opt/panbox-search-php84/app/uploads:/var/www/html/public/uploads
+      - /opt/panbox-search-php84/app/install:/var/www/html/public/install
+    depends_on:
+      - mysql
+      - redis
+    networks:
+      - panbox-search-php84-network
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:5.7
+    container_name: panbox-search-php84-mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=panbox-search
+      - MYSQL_DATABASE=panbox-search
+      - MYSQL_USER=panbox-search
+      - MYSQL_PASSWORD=panbox-search
+      - TZ=Asia/Shanghai
+    volumes:
+      - /opt/panbox-search-php84/mysql:/var/lib/mysql
+    networks:
+      - panbox-search-php84-network
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --max_connections=1000
+      - --max_allowed_packet=128M
+
+  openilink-poller:
+    image: ${PANBOX_POLLER_IMAGE:-kokojacket/panbox-openilink-poller:php-8.4}
+    container_name: panbox-search-php84-openilink-poller
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=panbox-search
+      - MYSQL_USER=panbox-search
+      - MYSQL_PASSWORD=panbox-search
+      - MYSQL_PREFIX=qf_
+      - PANBOX_INTERNAL_BASE_URL=http://app
+      - PANBOX_INTERNAL_TOKEN=${PANBOX_INTERNAL_TOKEN:-change-me}
+      - OPENILINK_MAX_CONCURRENCY=${OPENILINK_MAX_CONCURRENCY:-300}
+      - OPENILINK_CLAIM_LIMIT=${OPENILINK_CLAIM_LIMIT:-300}
+      - OPENILINK_LEASE_TTL=${OPENILINK_LEASE_TTL:-45}
+      - OPENILINK_POLL_TIMEOUT_MS=${OPENILINK_POLL_TIMEOUT_MS:-30000}
+      - OPENILINK_IDLE_SLEEP=${OPENILINK_IDLE_SLEEP:-3}
+      - OPENILINK_HTTP_TIMEOUT=${OPENILINK_HTTP_TIMEOUT:-45}
+      - OPENILINK_BACKEND_TIMEOUT=${OPENILINK_BACKEND_TIMEOUT:-120}
+    depends_on:
+      - app
+      - mysql
+    networks:
+      - panbox-search-php84-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: panbox-search-php84-redis
+    command: >
+      sh -c "if [ -n \"$${REDIS_PASSWORD}\" ]; then
+      redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\";
+      else
+      redis-server --appendonly yes;
+      fi"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    volumes:
+      - /opt/panbox-search-php84/redis:/data
+    networks:
+      - panbox-search-php84-network
+    restart: unless-stopped
+
+networks:
+  panbox-search-php84-network:
+    driver: bridge
