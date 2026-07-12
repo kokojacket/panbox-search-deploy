@@ -4,9 +4,9 @@
 # Panbox-Search Beta - 一键部署脚本
 # ============================================
 
-set -e
+set -eo pipefail
 
-SCRIPT_VERSION="2026.06.27.2"
+SCRIPT_VERSION="2026.07.12.1"
 SELF_UPDATE_RESTARTED_ENV="PANBOX_SEARCH_BETA_SCRIPT_SELF_UPDATED"
 SCRIPT_URLS=(
     "https://gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
@@ -16,6 +16,7 @@ SCRIPT_URLS=(
     "https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
 )
 PANBOX_DIR="/opt/panbox-search-beta"
+BACKUP_DIR="$PANBOX_DIR/backups"
 COMPOSE_FILE="docker-compose.yml"
 DEFAULT_IMAGE="kokojacket/panbox-search:beta"
 DEFAULT_POLLER_IMAGE="kokojacket/panbox-openilink-poller:beta"
@@ -265,6 +266,32 @@ run_compose() {
     fi
 }
 
+backup_database() {
+    local backup_file="$BACKUP_DIR/panbox-search-$(date +'%Y%m%d-%H%M%S').sql.gz"
+
+    mkdir -p "$BACKUP_DIR"
+    info "更新前备份数据库..."
+    if run_compose "exec -T mysql sh -c 'exec mysqldump -uroot -p\"\$MYSQL_ROOT_PASSWORD\" --single-transaction --quick --routines --triggers \"\$MYSQL_DATABASE\"'" | gzip > "$backup_file"; then
+        success "数据库已备份：$backup_file"
+    else
+        rm -f "$backup_file"
+        error "数据库备份失败，已取消更新"
+        return 1
+    fi
+
+    find "$BACKUP_DIR" -type f -name 'panbox-search-*.sql.gz' -mtime +30 -delete
+}
+
+ask_backup_database() {
+    local answer
+    if [ ! -t 0 ]; then
+        [ "${BACKUP_BEFORE_UPDATE:-false}" = "true" ] && backup_database || info "非交互更新，已跳过数据库备份"
+        return
+    fi
+    read -r -p "更新前是否备份数据库？[y/N] " answer
+    [[ "$answer" =~ ^[Yy]$ ]] && backup_database || info "已跳过数据库备份"
+}
+
 create_directories() {
     if [ ! -d "/opt" ]; then
         sudo mkdir -p /opt
@@ -499,6 +526,7 @@ update_system() {
     create_directories
     write_env_file
     write_compose_file
+    ask_backup_database
     run_compose "pull"
     run_compose "down --remove-orphans -t 60"
     run_compose "up -d --remove-orphans"
@@ -543,7 +571,26 @@ show_info() {
 
 check_and_force_self_update "$@"
 
-case "${1:-install}" in
+if [ $# -eq 0 ]; then
+    echo "1) 安装"
+    echo "2) 更新"
+    echo "3) 启动"
+    echo "4) 停止"
+    echo "5) 重启"
+    echo "0) 退出"
+    read -r -p "请选择操作 [0-5]: " choice
+    case "$choice" in
+        1) set -- install ;;
+        2) set -- update ;;
+        3) set -- start ;;
+        4) set -- stop ;;
+        5) set -- restart ;;
+        0) exit 0 ;;
+        *) error "无效选择"; exit 1 ;;
+    esac
+fi
+
+case "$1" in
     install)
         install_system
         ;;
