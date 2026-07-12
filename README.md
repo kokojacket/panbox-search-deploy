@@ -12,7 +12,7 @@ chmod +x panbox-search.sh
 
 ## 🧪 Beta 测试版部署
 
-Beta 版本使用独立安装目录、容器名、网络与默认端口，不会覆盖正式版部署。
+Beta 版本已使用 PHP 8.4，并使用独立安装目录、容器名、网络与默认端口，不会覆盖正式版部署。直接运行脚本会显示交互菜单，更新时可自行选择是否备份数据库。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh -o panbox-search-beta.sh
@@ -26,9 +26,9 @@ chmod +x panbox-search-beta.sh
 - 安装目录：`/opt/panbox-search-beta`
 - 默认端口：从 `8088` 开始自动查找可用端口
 
-## 🧪 PHP 8.4 迁移验证部署
+## 🧪 PHP 8.4 独立验证部署
 
-PHP 8.4 版本使用独立安装目录、容器名、网络与默认端口，不会覆盖正式版或 Beta 部署。
+`php-8.4` 标签保留为独立验证通道，使用独立安装目录、容器名、网络与默认端口，不会覆盖正式版或 Beta 部署。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-php84.sh -o panbox-search-php84.sh
