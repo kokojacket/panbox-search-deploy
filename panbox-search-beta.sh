@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-SCRIPT_VERSION="2026.07.12.1"
+SCRIPT_VERSION="2026.07.13.1"
 SELF_UPDATE_RESTARTED_ENV="PANBOX_SEARCH_BETA_SCRIPT_SELF_UPDATED"
 SCRIPT_URLS=(
     "https://gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
@@ -267,29 +267,27 @@ run_compose() {
 }
 
 backup_database() {
-    local backup_file="$BACKUP_DIR/panbox-search-$(date +'%Y%m%d-%H%M%S').sql.gz"
+    local backup_file="$BACKUP_DIR/panbox-search-latest.sql.gz"
+    local tmp_file="$backup_file.tmp"
+    local backup_status=0
 
     mkdir -p "$BACKUP_DIR"
     info "更新前备份数据库..."
-    if run_compose "exec -T mysql sh -c 'exec mysqldump -uroot -p\"\$MYSQL_ROOT_PASSWORD\" --single-transaction --quick --routines --triggers \"\$MYSQL_DATABASE\"'" | gzip > "$backup_file"; then
+    rm -f "$tmp_file"
+    cd "$PANBOX_DIR"
+    if [ "$NEED_SUDO" = true ]; then
+        sudo $COMPOSE_CMD exec -T mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --quick --routines --triggers "$MYSQL_DATABASE"' | gzip > "$tmp_file" || backup_status=$?
+    else
+        $COMPOSE_CMD exec -T mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --quick --routines --triggers "$MYSQL_DATABASE"' | gzip > "$tmp_file" || backup_status=$?
+    fi
+    if [ "$backup_status" -eq 0 ]; then
+        mv -f "$tmp_file" "$backup_file"
         success "数据库已备份：$backup_file"
     else
-        rm -f "$backup_file"
+        rm -f "$tmp_file"
         error "数据库备份失败，已取消更新"
         return 1
     fi
-
-    find "$BACKUP_DIR" -type f -name 'panbox-search-*.sql.gz' -mtime +30 -delete
-}
-
-ask_backup_database() {
-    local answer
-    if [ ! -t 0 ]; then
-        [ "${BACKUP_BEFORE_UPDATE:-false}" = "true" ] && backup_database || info "非交互更新，已跳过数据库备份"
-        return
-    fi
-    read -r -p "更新前是否备份数据库？[y/N] " answer
-    [[ "$answer" =~ ^[Yy]$ ]] && backup_database || info "已跳过数据库备份"
 }
 
 create_directories() {
@@ -526,7 +524,7 @@ update_system() {
     create_directories
     write_env_file
     write_compose_file
-    ask_backup_database
+    backup_database
     run_compose "pull"
     run_compose "down --remove-orphans -t 60"
     run_compose "up -d --remove-orphans"

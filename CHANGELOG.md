@@ -6,7 +6,7 @@
 
 ### Changed
 - Beta 部署说明同步为 PHP 8.4 运行基线，`php-8.4` 标签保留为独立验证通道。
-- `panbox-search-beta.sh` 改为无参数时显示交互菜单，更新前可选择是否备份数据库；非交互更新可通过 `BACKUP_BEFORE_UPDATE=true` 启用备份。
+- `panbox-search-beta.sh` 更新前自动备份数据库到 `backups/panbox-search-latest.sql.gz`，只保留最新一份；备份失败会中止更新。
 
 ### Added
 - 新增 `panbox-search-php84.sh` PHP 8.4 迁移验证一键部署脚本，默认安装到 `/opt/panbox-search-php84`，使用 `kokojacket/panbox-search:php-8.4` 镜像。
