@@ -2,6 +2,14 @@
 
 本文件记录 `deploy` 子仓库的主要变更（含未提交代码）。
 
+## [Unreleased] - 2026-07-18
+
+### Added
+- Beta 更新脚本新增 MySQL 5.7 到 8.4 的一次性逻辑迁移：停写后生成时间戳备份，使用独立数据目录导入，并按表数及配置、资源、链接、标签关系、转存日志、机器人绑定和 SAAS 用户等关键数据量复核结果；旧 5.7 数据目录保留用于回退。
+
+### Changed
+- Beta Compose 与一键部署脚本改用 `mysql:8.4` 和 `/opt/panbox-search-beta/mysql-8.4`，并移除 MySQL 8.4 已废弃的默认认证插件参数。
+
 ## [Unreleased] - 2026-06-29
 
 ### Changed

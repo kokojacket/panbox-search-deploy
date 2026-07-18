@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
 
   mysql:
-    image: mysql:5.7
+    image: mysql:8.4
     container_name: panbox-search-beta-mysql
     environment:
       - MYSQL_ROOT_PASSWORD=panbox-search
@@ -52,14 +52,13 @@ services:
       - MYSQL_PASSWORD=panbox-search
       - TZ=Asia/Shanghai
     volumes:
-      - /opt/panbox-search-beta/mysql:/var/lib/mysql
+      - /opt/panbox-search-beta/mysql-8.4:/var/lib/mysql
     networks:
       - panbox-search-beta-network
     restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --default-authentication-plugin=mysql_native_password
       - --max_connections=1000
       - --max_allowed_packet=128M
 

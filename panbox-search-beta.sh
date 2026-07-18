@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-SCRIPT_VERSION="2026.07.13.1"
+SCRIPT_VERSION="2026.07.18.1"
 SELF_UPDATE_RESTARTED_ENV="PANBOX_SEARCH_BETA_SCRIPT_SELF_UPDATED"
 SCRIPT_URLS=(
     "https://gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
@@ -17,11 +17,17 @@ SCRIPT_URLS=(
 )
 PANBOX_DIR="/opt/panbox-search-beta"
 BACKUP_DIR="$PANBOX_DIR/backups"
+MYSQL_CONTAINER="panbox-search-beta-mysql"
+MYSQL_LEGACY_DIR="$PANBOX_DIR/mysql"
+MYSQL_DATA_DIR="$PANBOX_DIR/mysql-8.4"
 COMPOSE_FILE="docker-compose.yml"
 DEFAULT_IMAGE="kokojacket/panbox-search:beta"
 DEFAULT_POLLER_IMAGE="kokojacket/panbox-openilink-poller:beta"
 COMPOSE_CMD=""
 NEED_SUDO=false
+MYSQL_MIGRATION_REQUIRED=false
+MYSQL_SOURCE_MANIFEST=""
+MYSQL_MIGRATION_BACKUP=""
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -266,8 +272,140 @@ run_compose() {
     fi
 }
 
+run_docker() {
+    if [ "$NEED_SUDO" = true ]; then
+        sudo docker "$@"
+    else
+        docker "$@"
+    fi
+}
+
+is_container_running() {
+    [ "$(run_docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" = "true" ]
+}
+
+wait_for_mysql() {
+    local attempt=0
+    while [ "$attempt" -lt 60 ]; do
+        if is_container_running "$MYSQL_CONTAINER" \
+            && run_docker exec "$MYSQL_CONTAINER" sh -c 'mysqladmin ping -h127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent' >/dev/null 2>&1; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+
+    error "MySQL 在 120 秒内未就绪"
+    run_docker logs --tail 80 "$MYSQL_CONTAINER" 2>/dev/null || true
+    return 1
+}
+
+verify_beta_runtime() {
+    local attempt=0
+    while [ "$attempt" -lt 90 ]; do
+        if is_container_running panbox-search-beta-app \
+            && run_docker exec panbox-search-beta-app curl -fsS http://127.0.0.1/api >/dev/null 2>&1; then
+            break
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    if [ "$attempt" -ge 90 ]; then
+        error "Beta 应用在 180 秒内未就绪"
+        run_docker logs --tail 120 panbox-search-beta-app 2>/dev/null || true
+        return 1
+    fi
+
+    local version
+    version="$(mysql_query 'SELECT VERSION()')"
+    case "$version" in
+        8.4.*) ;;
+        *) error "Beta 实际连接的 MySQL 版本异常：${version}"; return 1 ;;
+    esac
+
+    attempt=0
+    while [ "$attempt" -lt 30 ] && ! is_container_running panbox-search-beta-openilink-poller; do
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    if ! is_container_running panbox-search-beta-openilink-poller; then
+        error "OpenIlink Poller 未运行"
+        run_docker logs --tail 120 panbox-search-beta-openilink-poller 2>/dev/null || true
+        return 1
+    fi
+
+    success "Beta 运行链验证通过：MySQL ${version}、应用 API、OpenIlink Poller"
+}
+
+mysql_query() {
+    local sql="$1"
+    run_docker exec "$MYSQL_CONTAINER" sh -c \
+        'exec mysql -N -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" -e "$1"' sh "$sql"
+}
+
+table_row_count() {
+    local table="$1"
+    if [ "$(mysql_query "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '$table'")" -gt 0 ]; then
+        mysql_query "SELECT COUNT(*) FROM $table"
+    else
+        echo 0
+    fi
+}
+
+database_manifest() {
+    local table_count
+    table_count="$(mysql_query 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()')"
+    echo "$table_count:$(table_row_count qf_conf):$(table_row_count qf_source):$(table_row_count qf_source_link):$(table_row_count qf_source_tag_relation):$(table_row_count qf_source_log):$(table_row_count qf_openilink_bind):$(table_row_count qf_saas_user)"
+}
+
+detect_database_state() {
+    if [ ! -f "$PANBOX_DIR/$COMPOSE_FILE" ]; then
+        return 0
+    fi
+
+    if ! is_container_running "$MYSQL_CONTAINER"; then
+        info "启动当前 MySQL 以检查版本..."
+        run_compose "up -d mysql"
+    fi
+    wait_for_mysql
+
+    local version
+    version="$(mysql_query 'SELECT VERSION()')"
+    case "$version" in
+        5.7.*)
+            MYSQL_MIGRATION_REQUIRED=true
+            info "检测到 MySQL ${version}，本次更新将迁移到 8.4"
+            ;;
+        8.4.*)
+            info "当前已使用 MySQL ${version}"
+            ;;
+        *)
+            error "不支持从 MySQL ${version} 自动迁移到 8.4"
+            return 1
+            ;;
+    esac
+}
+
+stop_database_writers() {
+    local container
+    for container in panbox-search-beta-app panbox-search-beta-openilink-poller; do
+        if is_container_running "$container"; then
+            run_docker stop -t 60 "$container" >/dev/null
+        fi
+    done
+}
+
+start_database_writers() {
+    local container
+    for container in panbox-search-beta-app panbox-search-beta-openilink-poller; do
+        if run_docker inspect "$container" >/dev/null 2>&1 && ! is_container_running "$container"; then
+            run_docker start "$container" >/dev/null
+        fi
+    done
+}
+
 backup_database() {
-    local backup_file="$BACKUP_DIR/panbox-search-latest.sql.gz"
+    local backup_file="${1:-$BACKUP_DIR/panbox-search-latest.sql.gz}"
     local tmp_file="$backup_file.tmp"
     local backup_status=0
 
@@ -275,12 +413,10 @@ backup_database() {
     info "更新前备份数据库..."
     rm -f "$tmp_file"
     cd "$PANBOX_DIR"
-    if [ "$NEED_SUDO" = true ]; then
-        sudo $COMPOSE_CMD exec -T mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --quick --routines --triggers "$MYSQL_DATABASE"' | gzip > "$tmp_file" || backup_status=$?
-    else
-        $COMPOSE_CMD exec -T mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --quick --routines --triggers "$MYSQL_DATABASE"' | gzip > "$tmp_file" || backup_status=$?
-    fi
-    if [ "$backup_status" -eq 0 ]; then
+    run_docker exec "$MYSQL_CONTAINER" sh -c \
+        'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --quick --routines --triggers --events --hex-blob --default-character-set=utf8mb4 "$MYSQL_DATABASE"' \
+        | gzip > "$tmp_file" || backup_status=$?
+    if [ "$backup_status" -eq 0 ] && [ -s "$tmp_file" ] && gzip -t "$tmp_file"; then
         mv -f "$tmp_file" "$backup_file"
         success "数据库已备份：$backup_file"
     else
@@ -290,23 +426,78 @@ backup_database() {
     fi
 }
 
-create_directories() {
-    if [ ! -d "/opt" ]; then
-        sudo mkdir -p /opt
+migrate_mysql_57_to_84() {
+    if [ -d "$MYSQL_DATA_DIR" ] && [ -n "$(find "$MYSQL_DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+        error "MySQL 8.4 数据目录不为空，拒绝覆盖：$MYSQL_DATA_DIR"
+        return 1
     fi
 
-    if [ -w "/opt" ]; then
-        mkdir -p "$PANBOX_DIR"
-    else
-        sudo mkdir -p "$PANBOX_DIR"
-        sudo chown "$(whoami):$(whoami)" "$PANBOX_DIR"
+    stop_database_writers
+    if ! MYSQL_SOURCE_MANIFEST="$(database_manifest)"; then
+        error "读取迁移前数据库清单失败"
+        start_database_writers
+        return 1
+    fi
+    MYSQL_MIGRATION_BACKUP="$BACKUP_DIR/mysql-5.7-before-8.4-$(date +'%Y%m%d%H%M%S').sql.gz"
+    if ! backup_database "$MYSQL_MIGRATION_BACKUP"; then
+        start_database_writers
+        return 1
+    fi
+
+    run_compose "down --remove-orphans -t 60"
+    mkdir -p "$MYSQL_DATA_DIR"
+    run_compose "up -d mysql"
+    wait_for_mysql
+
+    local version
+    version="$(mysql_query 'SELECT VERSION()')"
+    case "$version" in
+        8.4.*) ;;
+        *)
+            error "新数据库版本异常：${version}"
+            return 1
+            ;;
+    esac
+
+    gzip -dc "$MYSQL_MIGRATION_BACKUP" \
+        | run_docker exec -i "$MYSQL_CONTAINER" sh -c \
+            'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"'
+
+    local target_manifest
+    target_manifest="$(database_manifest)"
+    if [ "$target_manifest" != "$MYSQL_SOURCE_MANIFEST" ]; then
+        error "迁移后数据校验失败：迁移前 $MYSQL_SOURCE_MANIFEST，迁移后 $target_manifest"
+        return 1
+    fi
+
+    {
+        echo "migrated_at=$(date '+%Y-%m-%d %H:%M:%S')"
+        echo "mysql_version=$version"
+        echo "backup=$MYSQL_MIGRATION_BACKUP"
+        echo "manifest=$target_manifest"
+        echo "legacy_data=$MYSQL_LEGACY_DIR"
+    } > "$PANBOX_DIR/mysql-8.4-migration.info"
+    success "MySQL 5.7 数据已迁移到 ${version}，旧目录保留在 $MYSQL_LEGACY_DIR"
+}
+
+create_directories() {
+    if [ ! -d "$PANBOX_DIR" ] || [ ! -w "$PANBOX_DIR" ]; then
+        if [ ! -d "/opt" ]; then
+            sudo mkdir -p /opt
+        fi
+        if [ -w "/opt" ]; then
+            mkdir -p "$PANBOX_DIR"
+        else
+            sudo mkdir -p "$PANBOX_DIR"
+            sudo chown "$(whoami):$(whoami)" "$PANBOX_DIR"
+        fi
     fi
 
     mkdir -p "$PANBOX_DIR/app/runtime"
     mkdir -p "$PANBOX_DIR/app/data"
     mkdir -p "$PANBOX_DIR/app/uploads"
     mkdir -p "$PANBOX_DIR/app/install"
-    mkdir -p "$PANBOX_DIR/mysql"
+    mkdir -p "$MYSQL_DATA_DIR"
     mkdir -p "$PANBOX_DIR/redis"
     chmod -R 777 "$PANBOX_DIR"
 }
@@ -434,7 +625,7 @@ services:
     restart: unless-stopped
 
   mysql:
-    image: mysql:5.7
+    image: mysql:8.4
     container_name: panbox-search-beta-mysql
     environment:
       - MYSQL_ROOT_PASSWORD=panbox-search
@@ -443,14 +634,13 @@ services:
       - MYSQL_PASSWORD=panbox-search
       - TZ=Asia/Shanghai
     volumes:
-      - /opt/panbox-search-beta/mysql:/var/lib/mysql
+      - /opt/panbox-search-beta/mysql-8.4:/var/lib/mysql
     networks:
       - panbox-search-beta-network
     restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --default-authentication-plugin=mysql_native_password
       - --max_connections=1000
       - --max_allowed_packet=128M
 
@@ -523,11 +713,17 @@ update_system() {
     check_docker_compose
     create_directories
     write_env_file
+    detect_database_state
     write_compose_file
-    backup_database
     run_compose "pull"
-    run_compose "down --remove-orphans -t 60"
+    if [ "$MYSQL_MIGRATION_REQUIRED" = true ]; then
+        migrate_mysql_57_to_84
+    else
+        backup_database
+        run_compose "down --remove-orphans -t 60"
+    fi
     run_compose "up -d --remove-orphans"
+    verify_beta_runtime
     show_info
 }
 

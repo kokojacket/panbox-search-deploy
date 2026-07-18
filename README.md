@@ -23,8 +23,12 @@ chmod +x panbox-search-beta.sh
 默认配置：
 
 - 镜像：`kokojacket/panbox-search:beta`
+- 数据库：`mysql:8.4`
 - 安装目录：`/opt/panbox-search-beta`
+- MySQL 8.4 数据目录：`/opt/panbox-search-beta/mysql-8.4`
 - 默认端口：从 `8088` 开始自动查找可用端口
+
+更新既有 MySQL 5.7 Beta 部署时，脚本会停止应用与 Poller 写入，生成并校验迁移备份，再导入新的 MySQL 8.4 数据目录。旧 `/opt/panbox-search-beta/mysql` 目录不会自动删除。
 
 ## 🧪 PHP 8.4 独立验证部署
 
