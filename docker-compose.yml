@@ -78,7 +78,7 @@ services:
 
   # ==================== MySQL 数据库 ====================
   mysql:
-    image: mysql:5.7
+    image: mysql:8.4
     container_name: panbox-search-mysql
 
     # 端口映射（如果不需要外部访问可以注释掉）
@@ -96,7 +96,7 @@ services:
     # 数据持久化
     volumes:
       # MySQL 数据目录
-      - /opt/panbox-search/mysql:/var/lib/mysql
+      - /opt/panbox-search/mysql-8.4:/var/lib/mysql
 
     # 网络配置
     networks:
@@ -109,7 +109,6 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --default-authentication-plugin=mysql_native_password
       - --max_connections=1000
       - --max_allowed_packet=128M
 
@@ -171,4 +170,3 @@ services:
 networks:
   panbox-search-network:
     driver: bridge
-

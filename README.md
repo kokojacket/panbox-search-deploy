@@ -10,6 +10,8 @@ chmod +x panbox-search.sh
 ./panbox-search.sh
 ```
 
+正式版默认使用 `mysql:8.4`，数据目录为 `/opt/panbox-search/mysql-8.4`。更新既有 MySQL 5.7 部署时，脚本会先停止应用与 Poller 写入，生成并校验迁移备份，再导入新的 8.4 数据目录；旧 `/opt/panbox-search/mysql` 目录不会自动删除。
+
 ## 🧪 Beta 测试版部署
 
 Beta 版本已使用 PHP 8.4，并使用独立安装目录、容器名、网络与默认端口，不会覆盖正式版部署。直接运行脚本会显示交互菜单，更新时可自行选择是否备份数据库。

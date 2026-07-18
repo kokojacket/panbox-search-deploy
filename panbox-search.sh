@@ -6,7 +6,7 @@
 # ============================================
 
 VERSION="2.0.0"
-SCRIPT_VERSION="2026.06.26.1"
+SCRIPT_VERSION="2026.07.18.1"
 AUTHOR="Kokojacket"
 SELF_UPDATE_RESTARTED_ENV="PANBOX_SEARCH_SCRIPT_SELF_UPDATED"
 SCRIPT_URLS=(
@@ -31,9 +31,17 @@ trap 'error "发生错误，脚本退出" >&2' ERR
 
 # 主目录
 PANBOX_DIR="/opt/panbox-search"
+BACKUP_DIR="$PANBOX_DIR/backups"
+MYSQL_CONTAINER="panbox-search-mysql"
+MYSQL_LEGACY_DIR="$PANBOX_DIR/mysql"
+MYSQL_DATA_DIR="$PANBOX_DIR/mysql-8.4"
+COMPOSE_FILE="docker-compose.yml"
 NEED_SUDO=false
 COMPOSE_CMD=""
 JUST_INSTALLED=false
+MYSQL_MIGRATION_REQUIRED=false
+MYSQL_SOURCE_MANIFEST=""
+MYSQL_MIGRATION_BACKUP=""
 
 # 颜色定义
 RED='\033[0;31m'
@@ -360,6 +368,230 @@ detect_existing_app_port() {
     return 1
 }
 
+run_docker() {
+    if [ "$NEED_SUDO" = true ]; then
+        sudo docker "$@"
+    else
+        docker "$@"
+    fi
+}
+
+is_container_running() {
+    [ "$(run_docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" = "true" ]
+}
+
+wait_for_mysql() {
+    local attempt=0
+    while [ "$attempt" -lt 60 ]; do
+        if is_container_running "$MYSQL_CONTAINER" \
+            && run_docker exec "$MYSQL_CONTAINER" sh -c 'mysqladmin ping -h127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent' >/dev/null 2>&1; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+
+    error "MySQL 在 120 秒内未就绪"
+    run_docker logs --tail 80 "$MYSQL_CONTAINER" 2>/dev/null || true
+    return 1
+}
+
+mysql_query() {
+    local sql="$1"
+    run_docker exec "$MYSQL_CONTAINER" sh -c \
+        'exec mysql -N -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" -e "$1"' sh "$sql"
+}
+
+table_row_count() {
+    local table="$1"
+    if [ "$(mysql_query "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '$table'")" -gt 0 ]; then
+        mysql_query "SELECT COUNT(*) FROM $table"
+    else
+        echo 0
+    fi
+}
+
+database_manifest() {
+    local table_count
+    table_count="$(mysql_query 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()')"
+    echo "$table_count:$(table_row_count qf_conf):$(table_row_count qf_source):$(table_row_count qf_source_link):$(table_row_count qf_source_tag_relation):$(table_row_count qf_source_log):$(table_row_count qf_openilink_bind):$(table_row_count qf_saas_user)"
+}
+
+directory_has_data() {
+    [ -d "$1" ] && [ -n "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
+}
+
+detect_database_state() {
+    MYSQL_MIGRATION_REQUIRED=false
+    if [ ! -f "$PANBOX_DIR/$COMPOSE_FILE" ]; then
+        error "未找到现有 docker-compose.yml，无法安全识别数据库版本"
+        return 1
+    fi
+
+    if directory_has_data "$MYSQL_LEGACY_DIR" \
+        && directory_has_data "$MYSQL_DATA_DIR" \
+        && [ ! -f "$PANBOX_DIR/mysql-8.4-migration.info" ]; then
+        error "检测到未完成的 MySQL 8.4 迁移，拒绝继续覆盖：$MYSQL_DATA_DIR"
+        return 1
+    fi
+
+    if ! is_container_running "$MYSQL_CONTAINER"; then
+        info "启动当前 MySQL 以检查版本..."
+        execute_compose "up -d mysql" "false"
+    fi
+    wait_for_mysql
+
+    local version
+    version="$(mysql_query 'SELECT VERSION()')"
+    case "$version" in
+        5.7.*)
+            MYSQL_MIGRATION_REQUIRED=true
+            info "检测到 MySQL ${version}，本次更新将迁移到 8.4"
+            ;;
+        8.4.*)
+            info "当前已使用 MySQL ${version}"
+            ;;
+        *)
+            error "不支持从 MySQL ${version} 自动迁移到 8.4"
+            return 1
+            ;;
+    esac
+}
+
+stop_database_writers() {
+    local container
+    for container in panbox-search-app panbox-openilink-poller; do
+        if is_container_running "$container"; then
+            run_docker stop -t 60 "$container" >/dev/null
+        fi
+    done
+}
+
+start_database_writers() {
+    local container
+    for container in panbox-search-app panbox-openilink-poller; do
+        if run_docker inspect "$container" >/dev/null 2>&1 && ! is_container_running "$container"; then
+            run_docker start "$container" >/dev/null
+        fi
+    done
+}
+
+backup_database() {
+    local backup_file="${1:-$BACKUP_DIR/panbox-search-latest.sql.gz}"
+    local tmp_file="$backup_file.tmp"
+
+    mkdir -p "$BACKUP_DIR"
+    info "更新前备份数据库..."
+    rm -f "$tmp_file"
+    cd "$PANBOX_DIR"
+    if (set -o pipefail; run_docker exec "$MYSQL_CONTAINER" sh -c \
+        'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --quick --routines --triggers --events --hex-blob --default-character-set=utf8mb4 "$MYSQL_DATABASE"' \
+        | gzip > "$tmp_file") \
+        && [ -s "$tmp_file" ] \
+        && gzip -t "$tmp_file"; then
+        mv -f "$tmp_file" "$backup_file"
+        success "数据库已备份：$backup_file"
+    else
+        rm -f "$tmp_file"
+        error "数据库备份失败，已取消更新"
+        return 1
+    fi
+}
+
+migrate_mysql_57_to_84() {
+    if directory_has_data "$MYSQL_DATA_DIR"; then
+        error "MySQL 8.4 数据目录不为空，拒绝覆盖：$MYSQL_DATA_DIR"
+        return 1
+    fi
+
+    stop_database_writers
+    if ! MYSQL_SOURCE_MANIFEST="$(database_manifest)"; then
+        error "读取迁移前数据库清单失败"
+        start_database_writers
+        return 1
+    fi
+    MYSQL_MIGRATION_BACKUP="$BACKUP_DIR/mysql-5.7-before-8.4-$(date +'%Y%m%d%H%M%S').sql.gz"
+    if ! backup_database "$MYSQL_MIGRATION_BACKUP"; then
+        start_database_writers
+        return 1
+    fi
+
+    execute_compose "down --remove-orphans -t 60" "false"
+    mkdir -p "$MYSQL_DATA_DIR"
+    execute_compose "up -d mysql" "false"
+    wait_for_mysql
+
+    local version
+    version="$(mysql_query 'SELECT VERSION()')"
+    case "$version" in
+        8.4.*) ;;
+        *)
+            error "新数据库版本异常：${version}"
+            return 1
+            ;;
+    esac
+
+    if ! (set -o pipefail; gzip -dc "$MYSQL_MIGRATION_BACKUP" \
+        | run_docker exec -i "$MYSQL_CONTAINER" sh -c \
+            'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"'); then
+        error "MySQL 8.4 数据导入失败，旧 5.7 数据和迁移备份均已保留"
+        return 1
+    fi
+
+    local target_manifest
+    target_manifest="$(database_manifest)"
+    if [ "$target_manifest" != "$MYSQL_SOURCE_MANIFEST" ]; then
+        error "迁移后数据校验失败：迁移前 $MYSQL_SOURCE_MANIFEST，迁移后 $target_manifest"
+        return 1
+    fi
+
+    {
+        echo "migrated_at=$(date '+%Y-%m-%d %H:%M:%S')"
+        echo "mysql_version=$version"
+        echo "backup=$MYSQL_MIGRATION_BACKUP"
+        echo "manifest=$target_manifest"
+        echo "legacy_data=$MYSQL_LEGACY_DIR"
+    } > "$PANBOX_DIR/mysql-8.4-migration.info"
+    success "MySQL 5.7 数据已迁移到 ${version}，旧目录保留在 $MYSQL_LEGACY_DIR"
+}
+
+verify_runtime() {
+    local attempt=0
+    while [ "$attempt" -lt 90 ]; do
+        if is_container_running panbox-search-app \
+            && run_docker exec panbox-search-app curl -fsS http://127.0.0.1/api >/dev/null 2>&1; then
+            break
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    if [ "$attempt" -ge 90 ]; then
+        error "正式版应用在 180 秒内未就绪"
+        run_docker logs --tail 120 panbox-search-app 2>/dev/null || true
+        return 1
+    fi
+
+    local version
+    version="$(mysql_query 'SELECT VERSION()')"
+    case "$version" in
+        8.4.*) ;;
+        *) error "正式版实际连接的 MySQL 版本异常：${version}"; return 1 ;;
+    esac
+
+    attempt=0
+    while [ "$attempt" -lt 30 ] && ! is_container_running panbox-openilink-poller; do
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    if ! is_container_running panbox-openilink-poller; then
+        error "OpenIlink Poller 未运行"
+        run_docker logs --tail 120 panbox-openilink-poller 2>/dev/null || true
+        return 1
+    fi
+
+    success "正式版运行链验证通过：MySQL ${version}、应用 API、OpenIlink Poller"
+}
+
 # 创建必要的目录
 create_directories() {
     info "创建数据目录..."
@@ -389,7 +621,7 @@ create_directories() {
     mkdir -p "${PANBOX_DIR}/app/data"
     mkdir -p "${PANBOX_DIR}/app/uploads"
     mkdir -p "${PANBOX_DIR}/app/install"
-    mkdir -p "${PANBOX_DIR}/mysql"
+    mkdir -p "${MYSQL_DATA_DIR}"
     mkdir -p "${PANBOX_DIR}/redis"
 
     chmod -R 777 "${PANBOX_DIR}"
@@ -398,7 +630,7 @@ create_directories() {
     info "  - 工作目录: ${PANBOX_DIR}/"
     info "  - 应用数据: ${PANBOX_DIR}/app/"
     info "  - License 数据: ${PANBOX_DIR}/app/data/"
-    info "  - 数据库数据: ${PANBOX_DIR}/mysql/"
+    info "  - 数据库数据: ${MYSQL_DATA_DIR}/"
     info "  - Redis 数据: ${PANBOX_DIR}/redis/"
 }
 
@@ -632,17 +864,21 @@ update_system() {
     check_docker_compose
 
     cd "${PANBOX_DIR}"
+    detect_database_state
     download_compose_file
     configure_env  # 检查并补全 .env 配置
     log "📦 正在拉取最新 Docker 镜像..."
     execute_compose "pull" "false"
-    # 先彻底停止旧容器再启动，避免新旧 MySQL 同时打开同一份数据目录抢锁：
-    # - --remove-orphans 清理遗留/孤儿容器，杜绝双实例 mysqld 抢 ibdata1
-    # - -t 60 给 MySQL 足够的优雅关闭时间，确保 InnoDB 完成 flush 并释放数据目录锁
-    log "🛑 正在停止旧容器（确保 MySQL 完全退出并释放数据目录锁）..."
-    execute_compose "down --remove-orphans -t 60" "false"
+    if [ "$MYSQL_MIGRATION_REQUIRED" = true ]; then
+        migrate_mysql_57_to_84
+    else
+        backup_database
+        log "🛑 正在停止旧容器（确保 MySQL 完全退出并释放数据目录锁）..."
+        execute_compose "down --remove-orphans -t 60" "false"
+    fi
     log "🚀 正在启动容器服务..."
     execute_compose "up -d --remove-orphans" "false"
+    verify_runtime
 }
 
 # 安装系统
