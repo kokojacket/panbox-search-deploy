@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-SCRIPT_VERSION="2026.07.18.1"
+SCRIPT_VERSION="2026.07.25.1"
 SELF_UPDATE_RESTARTED_ENV="PANBOX_SEARCH_BETA_SCRIPT_SELF_UPDATED"
 SCRIPT_URLS=(
     "https://gh-proxy.org/https://raw.githubusercontent.com/kokojacket/panbox-search-deploy/main/panbox-search-beta.sh"
@@ -26,8 +26,13 @@ DEFAULT_POLLER_IMAGE="kokojacket/panbox-openilink-poller:beta"
 COMPOSE_CMD=""
 NEED_SUDO=false
 MYSQL_MIGRATION_REQUIRED=false
+MYSQL_RECOVERY_REQUIRED=false
 MYSQL_SOURCE_MANIFEST=""
 MYSQL_MIGRATION_BACKUP=""
+MYSQL_PHYSICAL_BACKUP=""
+MYSQL_FAILED_TARGET_ARCHIVE=""
+MYSQL_RECOVERY_CONTAINER="panbox-search-beta-mysql57-recovery"
+MYSQL_MIGRATION_MARKER="$PANBOX_DIR/mysql-8.4-migration.info"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -284,11 +289,12 @@ is_container_running() {
     [ "$(run_docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" = "true" ]
 }
 
-wait_for_mysql() {
+wait_for_mysql_container() {
+    local container="$1"
     local attempt=0
     while [ "$attempt" -lt 60 ]; do
-        if is_container_running "$MYSQL_CONTAINER" \
-            && run_docker exec "$MYSQL_CONTAINER" sh -c 'mysqladmin ping -h127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent' >/dev/null 2>&1; then
+        if is_container_running "$container" \
+            && run_docker exec "$container" sh -c 'mysqladmin ping -h127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent' >/dev/null 2>&1; then
             return 0
         fi
         attempt=$((attempt + 1))
@@ -296,8 +302,12 @@ wait_for_mysql() {
     done
 
     error "MySQL 在 120 秒内未就绪"
-    run_docker logs --tail 80 "$MYSQL_CONTAINER" 2>/dev/null || true
+    run_docker logs --tail 80 "$container" 2>/dev/null || true
     return 1
+}
+
+wait_for_mysql() {
+    wait_for_mysql_container "$MYSQL_CONTAINER"
 }
 
 verify_beta_runtime() {
@@ -323,6 +333,15 @@ verify_beta_runtime() {
         *) error "Beta 实际连接的 MySQL 版本异常：${version}"; return 1 ;;
     esac
 
+    if ! run_docker exec panbox-search-beta-app php /var/www/html/think db:migrate; then
+        error "Beta 数据库迁移命令失败"
+        return 1
+    fi
+    if ! mysql_query 'SELECT COUNT(*) FROM qf_openilink_bind' >/dev/null; then
+        error "Beta 数据库缺少可查询的 qf_openilink_bind"
+        return 1
+    fi
+
     attempt=0
     while [ "$attempt" -lt 30 ] && ! is_container_running panbox-search-beta-openilink-poller; do
         attempt=$((attempt + 1))
@@ -334,40 +353,127 @@ verify_beta_runtime() {
         return 1
     fi
 
-    success "Beta 运行链验证通过：MySQL ${version}、应用 API、OpenIlink Poller"
+    local app_restarts mysql_restarts poller_restarts delay
+    app_restarts="$(run_docker inspect -f '{{.RestartCount}}' panbox-search-beta-app)" || return 1
+    mysql_restarts="$(run_docker inspect -f '{{.RestartCount}}' "$MYSQL_CONTAINER")" || return 1
+    poller_restarts="$(run_docker inspect -f '{{.RestartCount}}' panbox-search-beta-openilink-poller)" || return 1
+    delay="${VERIFY_STABILITY_DELAY:-30}"
+    sleep "$delay"
+    if ! is_container_running panbox-search-beta-app \
+        || ! is_container_running "$MYSQL_CONTAINER" \
+        || ! is_container_running panbox-search-beta-openilink-poller \
+        || ! run_docker exec panbox-search-beta-app curl -fsS http://127.0.0.1/api >/dev/null 2>&1 \
+        || [ "$(run_docker inspect -f '{{.RestartCount}}' panbox-search-beta-app)" != "$app_restarts" ] \
+        || [ "$(run_docker inspect -f '{{.RestartCount}}' "$MYSQL_CONTAINER")" != "$mysql_restarts" ] \
+        || [ "$(run_docker inspect -f '{{.RestartCount}}' panbox-search-beta-openilink-poller)" != "$poller_restarts" ]; then
+        error "Beta 运行链在 ${delay} 秒稳定性复查中失败"
+        return 1
+    fi
+
+    success "Beta 运行链验证通过：MySQL ${version}、数据库迁移、应用 API、OpenIlink Poller 与重启计数"
 }
 
 mysql_query() {
     local sql="$1"
-    run_docker exec "$MYSQL_CONTAINER" sh -c \
+    local container="${2:-$MYSQL_CONTAINER}"
+    run_docker exec "$container" sh -c \
         'exec mysql -N -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" -e "$1"' sh "$sql"
 }
 
 table_row_count() {
     local table="$1"
-    if [ "$(mysql_query "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '$table'")" -gt 0 ]; then
-        mysql_query "SELECT COUNT(*) FROM $table"
+    local container="${2:-$MYSQL_CONTAINER}"
+    local exists
+    exists="$(mysql_query "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '$table'" "$container")" || return 1
+    if [ "$exists" -gt 0 ]; then
+        mysql_query "SELECT COUNT(*) FROM $table" "$container" || return 1
     else
         echo 0
     fi
 }
 
 database_manifest() {
-    local table_count
-    table_count="$(mysql_query 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()')"
-    echo "$table_count:$(table_row_count qf_conf):$(table_row_count qf_source):$(table_row_count qf_source_link):$(table_row_count qf_source_tag_relation):$(table_row_count qf_source_log):$(table_row_count qf_openilink_bind):$(table_row_count qf_saas_user)"
+    local container="${1:-$MYSQL_CONTAINER}"
+    local table_count conf source source_link tag_relation source_log openilink_bind saas_user
+    table_count="$(mysql_query 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()' "$container")" || return 1
+    conf="$(table_row_count qf_conf "$container")" || return 1
+    source="$(table_row_count qf_source "$container")" || return 1
+    source_link="$(table_row_count qf_source_link "$container")" || return 1
+    tag_relation="$(table_row_count qf_source_tag_relation "$container")" || return 1
+    source_log="$(table_row_count qf_source_log "$container")" || return 1
+    openilink_bind="$(table_row_count qf_openilink_bind "$container")" || return 1
+    saas_user="$(table_row_count qf_saas_user "$container")" || return 1
+    printf '%s:%s:%s:%s:%s:%s:%s:%s\n' "$table_count" "$conf" "$source" "$source_link" "$tag_relation" "$source_log" "$openilink_bind" "$saas_user"
+}
+
+core_tables_exist() {
+    local container="${1:-$MYSQL_CONTAINER}"
+    local table
+    for table in qf_conf qf_node qf_auth qf_source; do
+        if [ "$(mysql_query "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '$table'" "$container")" != "1" ]; then
+            error "数据库缺少核心表：$table"
+            return 1
+        fi
+    done
+}
+
+directory_has_data() {
+    [ -d "$1" ] && [ -n "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
+}
+
+database_directories_are_unused() {
+    local containers container mounts
+    containers="$(run_docker ps -q)" || {
+        error "无法确认 MySQL 数据目录是否仍被容器占用"
+        return 1
+    }
+    for container in $containers; do
+        mounts="$(run_docker inspect -f '{{range .Mounts}}{{println .Source}}{{end}}' "$container")" || {
+            error "无法读取容器 $container 的挂载信息"
+            return 1
+        }
+        if printf '%s\n' "$mounts" | grep -Fxq "$MYSQL_LEGACY_DIR" \
+            || printf '%s\n' "$mounts" | grep -Fxq "$MYSQL_DATA_DIR"; then
+            error "容器 $container 仍占用 MySQL 数据目录，已停止迁移"
+            return 1
+        fi
+    done
 }
 
 detect_database_state() {
+    MYSQL_MIGRATION_REQUIRED=false
+    MYSQL_RECOVERY_REQUIRED=false
     if [ ! -f "$PANBOX_DIR/$COMPOSE_FILE" ]; then
+        return 0
+    fi
+
+    if directory_has_data "$MYSQL_LEGACY_DIR" \
+        && [ ! -f "$MYSQL_MIGRATION_MARKER" ] \
+        && { directory_has_data "$MYSQL_DATA_DIR" || grep -q 'image:[[:space:]]*mysql:8\.4' "$PANBOX_DIR/$COMPOSE_FILE"; }; then
+        if is_container_running "$MYSQL_CONTAINER" \
+            || grep -q 'image:[[:space:]]*mysql:8\.4' "$PANBOX_DIR/$COMPOSE_FILE"; then
+            if ! is_container_running "$MYSQL_CONTAINER"; then
+                run_compose "up -d mysql" || return 1
+            fi
+            wait_for_mysql || return 1
+            local current_version
+            current_version="$(mysql_query 'SELECT VERSION()')" || return 1
+            if [[ "$current_version" == 8.4.* ]] && core_tables_exist; then
+                error "MySQL 8.4 核心表完整但迁移标记缺失，无法安全判断 5.7 是否仍是最新数据"
+                error "已拒绝自动恢复；请保留两个数据目录并人工核对后再处理"
+                return 1
+            fi
+        fi
+        MYSQL_RECOVERY_REQUIRED=true
+        warning "检测到中断的 MySQL 8.4 迁移，本次更新将从保留的 5.7 数据自动恢复"
         return 0
     fi
 
     if ! is_container_running "$MYSQL_CONTAINER"; then
         info "启动当前 MySQL 以检查版本..."
-        run_compose "up -d mysql"
+        run_compose "up -d mysql" || return 1
     fi
-    wait_for_mysql
+    wait_for_mysql || return 1
 
     local version
     version="$(mysql_query 'SELECT VERSION()')"
@@ -390,7 +496,7 @@ stop_database_writers() {
     local container
     for container in panbox-search-beta-app panbox-search-beta-openilink-poller; do
         if is_container_running "$container"; then
-            run_docker stop -t 60 "$container" >/dev/null
+            run_docker stop -t 60 "$container" >/dev/null || return 1
         fi
     done
 }
@@ -409,15 +515,17 @@ backup_database() {
     local tmp_file="$backup_file.tmp"
     local backup_status=0
 
-    mkdir -p "$BACKUP_DIR"
+    mkdir -p "$BACKUP_DIR" || return 1
+    chmod 700 "$BACKUP_DIR" || return 1
     info "更新前备份数据库..."
     rm -f "$tmp_file"
     cd "$PANBOX_DIR"
-    run_docker exec "$MYSQL_CONTAINER" sh -c \
+    (umask 077; run_docker exec "$MYSQL_CONTAINER" sh -c \
         'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --quick --routines --triggers --events --hex-blob --default-character-set=utf8mb4 "$MYSQL_DATABASE"' \
-        | gzip > "$tmp_file" || backup_status=$?
+        | gzip > "$tmp_file") || backup_status=$?
     if [ "$backup_status" -eq 0 ] && [ -s "$tmp_file" ] && gzip -t "$tmp_file"; then
         mv -f "$tmp_file" "$backup_file"
+        chmod 600 "$backup_file" || return 1
         success "数据库已备份：$backup_file"
     else
         rm -f "$tmp_file"
@@ -426,58 +534,245 @@ backup_database() {
     fi
 }
 
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+create_legacy_physical_backup() {
+    mkdir -p "$BACKUP_DIR" || return 1
+    chmod 700 "$BACKUP_DIR" || return 1
+
+    local source_kb available_kb
+    source_kb="$(du -sk "$MYSQL_LEGACY_DIR" 2>/dev/null | awk '{print $1}')" || {
+        error "无法读取旧 MySQL 5.7 数据目录大小，已停止恢复"
+        return 1
+    }
+    available_kb="$(df -Pk "$BACKUP_DIR" | awk 'END {print $4}')" || return 1
+    if ! [[ "$source_kb" =~ ^[0-9]+$ && "$available_kb" =~ ^[0-9]+$ ]] \
+        || [ "$available_kb" -le $((source_kb * 2 + 102400)) ]; then
+        error "备份空间不足：旧库约 ${source_kb:-未知} KB，可用 ${available_kb:-未知} KB"
+        return 1
+    fi
+
+    local timestamp tmp_file checksum
+    timestamp="$(date +'%Y%m%d%H%M%S')"
+    MYSQL_PHYSICAL_BACKUP="$BACKUP_DIR/mysql-5.7-physical-${timestamp}.tar.gz"
+    while [ -e "$MYSQL_PHYSICAL_BACKUP" ] || [ -e "$MYSQL_PHYSICAL_BACKUP.tmp" ]; do
+        sleep 1
+        timestamp="$(date +'%Y%m%d%H%M%S')"
+        MYSQL_PHYSICAL_BACKUP="$BACKUP_DIR/mysql-5.7-physical-${timestamp}.tar.gz"
+    done
+    tmp_file="$MYSQL_PHYSICAL_BACKUP.tmp"
+
+    info "为旧 MySQL 5.7 物理目录创建保护副本..."
+    if ! (umask 077; tar -C "$(dirname "$MYSQL_LEGACY_DIR")" -czpf "$tmp_file" "$(basename "$MYSQL_LEGACY_DIR")") \
+        || ! tar -tzf "$tmp_file" >/dev/null; then
+        error "旧库物理保护副本失败，已停止恢复；临时文件保留在 $tmp_file"
+        return 1
+    fi
+    mv "$tmp_file" "$MYSQL_PHYSICAL_BACKUP" || return 1
+    chmod 600 "$MYSQL_PHYSICAL_BACKUP" || return 1
+    checksum="$(sha256_file "$MYSQL_PHYSICAL_BACKUP")" || return 1
+    (umask 077; printf '%s  %s\n' "$checksum" "$(basename "$MYSQL_PHYSICAL_BACKUP")" > "$MYSQL_PHYSICAL_BACKUP.sha256.tmp") || return 1
+    mv "$MYSQL_PHYSICAL_BACKUP.sha256.tmp" "$MYSQL_PHYSICAL_BACKUP.sha256" || return 1
+    chmod 600 "$MYSQL_PHYSICAL_BACKUP.sha256" || return 1
+    success "旧库物理保护副本已生成：$MYSQL_PHYSICAL_BACKUP"
+}
+
+start_mysql57_recovery_container() {
+    run_docker rm -f "$MYSQL_RECOVERY_CONTAINER" >/dev/null 2>&1 || true
+    if ! run_docker run -d --name "$MYSQL_RECOVERY_CONTAINER" --network none \
+        -e MYSQL_ROOT_PASSWORD=panbox-search \
+        -e MYSQL_DATABASE=panbox-search \
+        -v "$MYSQL_LEGACY_DIR:/var/lib/mysql" \
+        mysql:5.7 \
+        --character-set-server=utf8mb4 \
+        --collation-server=utf8mb4_unicode_ci >/dev/null; then
+        error "临时 MySQL 5.7 恢复容器启动失败"
+        return 1
+    fi
+    if ! wait_for_mysql_container "$MYSQL_RECOVERY_CONTAINER"; then
+        run_docker rm -f "$MYSQL_RECOVERY_CONTAINER" >/dev/null 2>&1 || true
+        return 1
+    fi
+}
+
+stop_mysql57_recovery_container() {
+    if is_container_running "$MYSQL_RECOVERY_CONTAINER"; then
+        run_docker exec "$MYSQL_RECOVERY_CONTAINER" sh -c \
+            'mysqladmin shutdown -uroot -p"$MYSQL_ROOT_PASSWORD"' >/dev/null 2>&1 \
+            || run_docker stop -t 60 "$MYSQL_RECOVERY_CONTAINER" >/dev/null \
+            || return 1
+    fi
+    run_docker rm -f "$MYSQL_RECOVERY_CONTAINER" >/dev/null 2>&1 || return 1
+}
+
+create_legacy_logical_backup() {
+    local timestamp tmp_file dump_log table
+    timestamp="$(date +'%Y%m%d%H%M%S')"
+    MYSQL_MIGRATION_BACKUP="$BACKUP_DIR/mysql-5.7-before-8.4-${timestamp}.sql.gz"
+    while [ -e "$MYSQL_MIGRATION_BACKUP" ] || [ -e "$MYSQL_MIGRATION_BACKUP.tmp" ]; do
+        sleep 1
+        timestamp="$(date +'%Y%m%d%H%M%S')"
+        MYSQL_MIGRATION_BACKUP="$BACKUP_DIR/mysql-5.7-before-8.4-${timestamp}.sql.gz"
+    done
+    tmp_file="$MYSQL_MIGRATION_BACKUP.tmp"
+    dump_log="$MYSQL_MIGRATION_BACKUP.log"
+    rm -f "$dump_log"
+
+    info "从受保护的 MySQL 5.7 数据重新生成逻辑备份..."
+    if ! (umask 077; set -o pipefail; run_docker exec "$MYSQL_RECOVERY_CONTAINER" sh -c \
+        'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --quick --routines --triggers --events --hex-blob --default-character-set=utf8mb4 "$MYSQL_DATABASE"' \
+        2> "$dump_log" | gzip > "$tmp_file") \
+        || [ ! -s "$tmp_file" ] \
+        || ! gzip -t "$tmp_file"; then
+        error "MySQL 5.7 逻辑备份失败，已停止恢复；错误日志：$dump_log"
+        error "未完成备份保留在：$tmp_file"
+        return 1
+    fi
+
+    for table in qf_conf qf_node qf_auth qf_source; do
+        if ! (set +o pipefail; gzip -dc "$tmp_file" | grep -Fq "CREATE TABLE \`$table\`"); then
+            error "逻辑备份缺少核心表 ${table}，已停止恢复；备份保留在 $tmp_file"
+            return 1
+        fi
+    done
+    mv "$tmp_file" "$MYSQL_MIGRATION_BACKUP" || return 1
+    chmod 600 "$MYSQL_MIGRATION_BACKUP" "$dump_log" || return 1
+    success "MySQL 5.7 逻辑备份已生成：$MYSQL_MIGRATION_BACKUP"
+}
+
+archive_failed_mysql84_target() {
+    MYSQL_FAILED_TARGET_ARCHIVE=""
+    if directory_has_data "$MYSQL_DATA_DIR"; then
+        local timestamp
+        timestamp="$(date +'%Y%m%d%H%M%S')"
+        MYSQL_FAILED_TARGET_ARCHIVE="$MYSQL_DATA_DIR.failed-$timestamp"
+        while [ -e "$MYSQL_FAILED_TARGET_ARCHIVE" ]; do
+            sleep 1
+            timestamp="$(date +'%Y%m%d%H%M%S')"
+            MYSQL_FAILED_TARGET_ARCHIVE="$MYSQL_DATA_DIR.failed-$timestamp"
+        done
+        mv "$MYSQL_DATA_DIR" "$MYSQL_FAILED_TARGET_ARCHIVE" || return 1
+        warning "失败的 MySQL 8.4 数据已归档：$MYSQL_FAILED_TARGET_ARCHIVE"
+    elif [ -d "$MYSQL_DATA_DIR" ]; then
+        rmdir "$MYSQL_DATA_DIR" || return 1
+    fi
+    mkdir -p "$MYSQL_DATA_DIR" || return 1
+}
+
+write_migration_marker() {
+    local source_version="$1"
+    local target_version="$2"
+    local target_manifest="$3"
+    local backup_sha256 marker_tmp
+    backup_sha256="$(sha256_file "$MYSQL_MIGRATION_BACKUP")" || return 1
+    marker_tmp="$MYSQL_MIGRATION_MARKER.tmp"
+    rm -f "$marker_tmp"
+
+    (umask 077; {
+        echo "migrated_at=$(date '+%Y-%m-%d %H:%M:%S')"
+        echo "source_version=$source_version"
+        echo "target_version=$target_version"
+        echo "physical_backup=$MYSQL_PHYSICAL_BACKUP"
+        echo "logical_backup=$MYSQL_MIGRATION_BACKUP"
+        echo "backup_sha256=$backup_sha256"
+        echo "source_manifest=$MYSQL_SOURCE_MANIFEST"
+        echo "target_manifest=$target_manifest"
+        echo "legacy_data=$MYSQL_LEGACY_DIR"
+        echo "failed_target_archive=$MYSQL_FAILED_TARGET_ARCHIVE"
+        echo "mysql_version=$target_version"
+        echo "backup=$MYSQL_MIGRATION_BACKUP"
+        echo "manifest=$target_manifest"
+    } > "$marker_tmp") || return 1
+    mv "$marker_tmp" "$MYSQL_MIGRATION_MARKER" || return 1
+    chmod 600 "$MYSQL_MIGRATION_MARKER" || return 1
+}
+
 migrate_mysql_57_to_84() {
-    if [ -d "$MYSQL_DATA_DIR" ] && [ -n "$(find "$MYSQL_DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
-        error "MySQL 8.4 数据目录不为空，拒绝覆盖：$MYSQL_DATA_DIR"
+    info "正在准备可恢复的 MySQL 5.7 → 8.4 迁移..."
+    if ! run_compose "down --remove-orphans -t 60"; then
+        error "停止现有容器失败，未触碰数据库目录"
         return 1
     fi
-
-    stop_database_writers
-    if ! MYSQL_SOURCE_MANIFEST="$(database_manifest)"; then
-        error "读取迁移前数据库清单失败"
-        start_database_writers
+    if run_docker inspect "$MYSQL_RECOVERY_CONTAINER" >/dev/null 2>&1; then
+        stop_mysql57_recovery_container || return 1
+    fi
+    if is_container_running "$MYSQL_CONTAINER" \
+        || is_container_running panbox-search-beta-app \
+        || is_container_running panbox-search-beta-openilink-poller; then
+        error "仍有容器占用数据库，已停止迁移"
         return 1
     fi
-    MYSQL_MIGRATION_BACKUP="$BACKUP_DIR/mysql-5.7-before-8.4-$(date +'%Y%m%d%H%M%S').sql.gz"
-    if ! backup_database "$MYSQL_MIGRATION_BACKUP"; then
-        start_database_writers
+    database_directories_are_unused || return 1
+
+    create_legacy_physical_backup || return 1
+    start_mysql57_recovery_container || return 1
+
+    local source_version target_version target_manifest
+    source_version="$(mysql_query 'SELECT VERSION()' "$MYSQL_RECOVERY_CONTAINER")" || {
+        stop_mysql57_recovery_container || true
+        error "读取旧数据库版本失败"
+        return 1
+    }
+    case "$source_version" in
+        5.7.*) ;;
+        *)
+            stop_mysql57_recovery_container || true
+            error "旧数据目录版本异常：$source_version"
+            return 1
+            ;;
+    esac
+    if ! MYSQL_SOURCE_MANIFEST="$(database_manifest "$MYSQL_RECOVERY_CONTAINER")" \
+        || ! core_tables_exist "$MYSQL_RECOVERY_CONTAINER"; then
+        stop_mysql57_recovery_container || true
+        error "读取 MySQL 5.7 源数据库清单失败"
         return 1
     fi
+    if ! create_legacy_logical_backup; then
+        stop_mysql57_recovery_container || true
+        return 1
+    fi
+    stop_mysql57_recovery_container || {
+        error "临时 MySQL 5.7 容器无法安全停止，已停止迁移"
+        return 1
+    }
 
-    run_compose "down --remove-orphans -t 60"
-    mkdir -p "$MYSQL_DATA_DIR"
-    run_compose "up -d mysql"
-    wait_for_mysql
+    archive_failed_mysql84_target || return 1
+    run_compose "up -d mysql" || return 1
+    wait_for_mysql || return 1
 
-    local version
-    version="$(mysql_query 'SELECT VERSION()')"
-    case "$version" in
+    target_version="$(mysql_query 'SELECT VERSION()')" || return 1
+    case "$target_version" in
         8.4.*) ;;
         *)
-            error "新数据库版本异常：${version}"
+            error "新数据库版本异常：${target_version}"
             return 1
             ;;
     esac
 
-    gzip -dc "$MYSQL_MIGRATION_BACKUP" \
+    if ! (set -o pipefail; gzip -dc "$MYSQL_MIGRATION_BACKUP" \
         | run_docker exec -i "$MYSQL_CONTAINER" sh -c \
-            'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"'
+            'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"'); then
+        error "MySQL 8.4 数据导入失败，旧 5.7 数据和迁移备份均已保留"
+        return 1
+    fi
 
-    local target_manifest
-    target_manifest="$(database_manifest)"
+    target_manifest="$(database_manifest)" || return 1
+    core_tables_exist || return 1
     if [ "$target_manifest" != "$MYSQL_SOURCE_MANIFEST" ]; then
         error "迁移后数据校验失败：迁移前 $MYSQL_SOURCE_MANIFEST，迁移后 $target_manifest"
         return 1
     fi
-
-    {
-        echo "migrated_at=$(date '+%Y-%m-%d %H:%M:%S')"
-        echo "mysql_version=$version"
-        echo "backup=$MYSQL_MIGRATION_BACKUP"
-        echo "manifest=$target_manifest"
-        echo "legacy_data=$MYSQL_LEGACY_DIR"
-    } > "$PANBOX_DIR/mysql-8.4-migration.info"
-    success "MySQL 5.7 数据已迁移到 ${version}，旧目录保留在 $MYSQL_LEGACY_DIR"
+    write_migration_marker "$source_version" "$target_version" "$target_manifest" || {
+        error "迁移标记写入失败，应用与 Poller 不会启动"
+        return 1
+    }
+    success "MySQL 5.7 数据已迁移到 ${target_version}，旧目录和恢复备份均已保留"
 }
 
 create_directories() {
@@ -499,7 +794,10 @@ create_directories() {
     mkdir -p "$PANBOX_DIR/app/install"
     mkdir -p "$MYSQL_DATA_DIR"
     mkdir -p "$PANBOX_DIR/redis"
-    chmod -R 777 "$PANBOX_DIR"
+    chmod 755 "$PANBOX_DIR"
+    chmod -R 777 "$PANBOX_DIR/app/runtime" "$PANBOX_DIR/app/data" \
+        "$PANBOX_DIR/app/uploads" "$PANBOX_DIR/app/install" \
+        "$MYSQL_DATA_DIR" "$PANBOX_DIR/redis"
 }
 
 write_env_file() {
@@ -708,22 +1006,35 @@ install_system() {
 
 update_system() {
     log "开始更新 Panbox Search Beta..."
-    check_docker
-    check_docker_permissions
-    check_docker_compose
-    create_directories
-    write_env_file
-    detect_database_state
-    write_compose_file
-    run_compose "pull"
-    if [ "$MYSQL_MIGRATION_REQUIRED" = true ]; then
-        migrate_mysql_57_to_84
-    else
-        backup_database
-        run_compose "down --remove-orphans -t 60"
+    check_docker || return 1
+    check_docker_permissions || return 1
+    check_docker_compose || return 1
+    create_directories || return 1
+    write_env_file || return 1
+    detect_database_state || return 1
+    if [ "$MYSQL_RECOVERY_REQUIRED" = true ]; then
+        log "检测到中断迁移，先停止全部数据库写入服务..."
+        run_compose "down --remove-orphans -t 60" || return 1
     fi
-    run_compose "up -d --remove-orphans"
-    verify_beta_runtime
+    write_compose_file || return 1
+    run_compose "pull" || return 1
+    if [ "$MYSQL_MIGRATION_REQUIRED" = true ] || [ "$MYSQL_RECOVERY_REQUIRED" = true ]; then
+        if ! migrate_mysql_57_to_84; then
+            error "数据库迁移/恢复未完成；请保留现有目录和备份，排除上方错误后重新执行 update"
+            return 1
+        fi
+    else
+        backup_database || return 1
+        run_compose "down --remove-orphans -t 60" || return 1
+    fi
+    if ! run_compose "up -d --remove-orphans"; then
+        stop_database_writers || true
+        return 1
+    fi
+    if ! verify_beta_runtime; then
+        stop_database_writers || true
+        return 1
+    fi
     show_info
 }
 

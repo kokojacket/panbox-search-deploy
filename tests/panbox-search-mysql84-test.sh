@@ -81,6 +81,8 @@ case "${1:-}" in
     info)
         exit 0
         ;;
+    ps)
+        ;;
     compose)
         shift
         case "${1:-}" in
@@ -116,8 +118,21 @@ case "${1:-}" in
         file="$(state_file "$container")"
         test -f "$file"
         if [ "${2:-}" = "-f" ]; then
-            cat "$file"
+            if [[ "${3:-}" == *RestartCount* ]]; then echo 0; else cat "$file"; fi
         fi
+        ;;
+    run)
+        container=""
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = --name ]; then container="${2:?}"; shift 2; else shift; fi
+        done
+        printf '%s\n' true > "$(state_file "$container")"
+        echo fake-container-id
+        ;;
+    rm)
+        container=""
+        for arg in "$@"; do container="$arg"; done
+        rm -f "$(state_file "$container")"
         ;;
     stop)
         container=""
@@ -145,7 +160,12 @@ case "${1:-}" in
                 test "$(cat "$(state_file panbox-search-app)")" = false
                 test "$(cat "$(state_file panbox-openilink-poller)")" = false
             fi
-            printf '%s\n' 'CREATE TABLE `qf_conf` (`conf_id` int);' 'INSERT INTO `qf_conf` VALUES (1);'
+            for table in qf_conf qf_node qf_auth qf_source qf_schema_migrations qf_source_link qf_source_tag_relation qf_source_log qf_openilink_bind qf_saas_user; do
+                printf 'CREATE TABLE `%s` (`id` int);\n' "$table"
+            done
+            exit 0
+        fi
+        if [[ "$joined" == *'php /var/www/html/think db:migrate'* ]]; then
             exit 0
         fi
         if [[ "$joined" == *'mysql -N '* ]]; then
@@ -185,19 +205,24 @@ for run in 1 2; do
     PATH="$BIN_DIR:$PATH" \
     FAKE_DOCKER_STATE="$STATE_DIR" \
     FAKE_COMPOSE_SOURCE="$ROOT_DIR/docker-compose.yml" \
+    VERIFY_STABILITY_DELAY=0 \
     PANBOX_SEARCH_SCRIPT_SELF_UPDATED=1 \
     bash "$SCRIPT_UNDER_TEST" update
 done
 
 grep -q 'image: mysql:8.4' "$INSTALL_DIR/docker-compose.yml"
 grep -q '/opt/panbox-search/mysql-8.4:/var/lib/mysql' "$INSTALL_DIR/docker-compose.yml"
-! grep -q 'default-authentication-plugin' "$INSTALL_DIR/docker-compose.yml"
+if grep -q 'default-authentication-plugin' "$INSTALL_DIR/docker-compose.yml"; then exit 1; fi
 test -f "$INSTALL_DIR/mysql/ibdata1"
 grep -q '^mysql_version=8.4.10$' "$INSTALL_DIR/mysql-8.4-migration.info"
 grep -q '^manifest=33:171:9:12:15:4:2:1$' "$INSTALL_DIR/mysql-8.4-migration.info"
 backup_file="$(find "$INSTALL_DIR/backups" -name 'mysql-5.7-before-8.4-*.sql.gz' -print -quit)"
 test -n "$backup_file"
 gzip -t "$backup_file"
+physical_backup="$(find "$INSTALL_DIR/backups" -name 'mysql-5.7-physical-*.tar.gz' -print -quit)"
+test -n "$physical_backup"
+tar -tzf "$physical_backup" >/dev/null
+test -f "$physical_backup.sha256"
 gzip -t "$INSTALL_DIR/backups/panbox-search-latest.sql.gz"
 
 echo 'PASS panbox-search MySQL 5.7 -> 8.4 migration and repeat update flow'
